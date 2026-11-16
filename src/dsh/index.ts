@@ -232,8 +232,6 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
 
   const setTtyInteractiveState = (active: boolean) => {
     if (!interactive) return;
-    if (active) process.stdin.resume();
-    else process.stdin.pause();
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       try {
         process.stdin.setRawMode(active);
@@ -937,7 +935,6 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   let onResize: (() => void) | undefined;
   if (interactive) {
     parser = new BracketedPasteParser();
-    setTtyInteractiveState(attached);
     const initialResume = rawConfig.resume || process.env.NS_DSH_RESUME || undefined;
     void ensureRootAgent(initialResume).then(() => {
       if (attached) {
@@ -1008,6 +1005,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
       }
     };
     process.stdin.on('data', onData);
+    setTtyInteractiveState(attached);
 
     let ttyCleaned = false;
     cleanupInteractiveTty = () => {
@@ -1016,6 +1014,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
       setTtyInteractiveState(false);
       if (onData) process.stdin.off('data', onData);
       if (onResize) process.stdout?.off('resize', onResize);
+      // Release stdin ref only on final plugin teardown so test/daemon loops exit cleanly.
+      process.stdin.pause();
     };
   }
 
