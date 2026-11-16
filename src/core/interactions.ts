@@ -22,6 +22,13 @@ interface ActiveQuestion {
   cleanup: () => void;
 }
 
+const HIGH_RISK_TOOLS = new Set(['bash', 'shell', 'exec', 'run_command']);
+
+function isSessionGrantEligible(toolName: string, code?: string): boolean {
+  if (code?.startsWith('CUGA_')) return false;
+  return !HIGH_RISK_TOOLS.has(toolName.toLowerCase());
+}
+
 export class TerminalInteractionController {
   private readonly sessionAllowedTools = new Set<string>();
   private activeApproval: ActiveApproval | null = null;
@@ -61,7 +68,9 @@ export class TerminalInteractionController {
     signal?: AbortSignal;
   }): Promise<ApprovalOutcome> {
     if (req.signal?.aborted) return 'cancelled';
-    if (this.sessionAllowedTools.has(req.toolName)) return 'allowed-once';
+    if (isSessionGrantEligible(req.toolName, req.code) && this.sessionAllowedTools.has(req.toolName)) {
+      return 'allowed-once';
+    }
 
     if (this.activeApproval) {
       this.activeApproval.cleanup();
@@ -110,6 +119,9 @@ export class TerminalInteractionController {
     questions: PendingQuestionPrompt['questions'];
     signal?: AbortSignal;
   }): Promise<{ cancelled: boolean; answers: QuestionAnswerItem[] }> {
+    if (!Array.isArray(req.questions) || req.questions.length === 0) {
+      return { cancelled: false, answers: [] };
+    }
     if (req.signal?.aborted) return { cancelled: true, answers: [] };
     if (this.activeQuestion) {
       this.activeQuestion.cleanup();
@@ -188,6 +200,10 @@ export class TerminalInteractionController {
         return true;
       }
       if (lower === 'a' || lower === 'always') {
+        if (!isSessionGrantEligible(approval.prompt.toolName, approval.prompt.code)) {
+          this.writeFn(`[One-off approval only for high-risk tool: ${approval.prompt.toolName}; enter [y] once or [n] deny]\n`);
+          return true;
+        }
         this.sessionAllowedTools.add(approval.prompt.toolName);
         this.writeFn(`[Allowed for session: ${approval.prompt.toolName}]\n`);
         approval.resolve('allowed-once');

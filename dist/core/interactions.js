@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { renderApprovalBox, renderQuestionBox } from './renderer.js';
+const HIGH_RISK_TOOLS = new Set(['bash', 'shell', 'exec', 'run_command']);
+function isSessionGrantEligible(toolName, code) {
+    if (code?.startsWith('CUGA_'))
+        return false;
+    return !HIGH_RISK_TOOLS.has(toolName.toLowerCase());
+}
 export class TerminalInteractionController {
     sessionAllowedTools = new Set();
     activeApproval = null;
@@ -28,8 +34,9 @@ export class TerminalInteractionController {
     async promptApproval(req) {
         if (req.signal?.aborted)
             return 'cancelled';
-        if (this.sessionAllowedTools.has(req.toolName))
+        if (isSessionGrantEligible(req.toolName, req.code) && this.sessionAllowedTools.has(req.toolName)) {
             return 'allowed-once';
+        }
         if (this.activeApproval) {
             this.activeApproval.cleanup();
             this.activeApproval.resolve('rejected');
@@ -74,6 +81,9 @@ export class TerminalInteractionController {
         });
     }
     async promptQuestion(req) {
+        if (!Array.isArray(req.questions) || req.questions.length === 0) {
+            return { cancelled: false, answers: [] };
+        }
         if (req.signal?.aborted)
             return { cancelled: true, answers: [] };
         if (this.activeQuestion) {
@@ -152,6 +162,10 @@ export class TerminalInteractionController {
                 return true;
             }
             if (lower === 'a' || lower === 'always') {
+                if (!isSessionGrantEligible(approval.prompt.toolName, approval.prompt.code)) {
+                    this.writeFn(`[One-off approval only for high-risk tool: ${approval.prompt.toolName}; enter [y] once or [n] deny]\n`);
+                    return true;
+                }
                 this.sessionAllowedTools.add(approval.prompt.toolName);
                 this.writeFn(`[Allowed for session: ${approval.prompt.toolName}]\n`);
                 approval.resolve('allowed-once');

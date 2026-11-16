@@ -95,12 +95,18 @@ test('TerminalInteractionController handles Ctrl+C reject, [y]/[a] grants, and m
   assert.equal(await p1, 'rejected');
   assert.equal(ctrl.hasActivePrompt(), false);
 
-  // 2. 'a' grants session-level approval for that tool name
-  const p2 = ctrl.promptApproval({ toolName: 'bash', reason: 'npm test' });
+  // 2. 'a' grants session-level approval for non-shell/non-CUGA tools, while refusing blanket 'a' on high-risk tools
+  const pRisky = ctrl.promptApproval({ toolName: 'bash', reason: 'rm temp', code: 'CUGA_MUTATION_GATE', commandPreview: 'rm -rf tmp' });
+  assert.equal(ctrl.handleInputLine('a'), true);
+  assert.equal(ctrl.hasSessionGrant('bash'), false);
+  assert.equal(ctrl.handleInputLine('y'), true);
+  assert.equal(await pRisky, 'allowed-once');
+
+  const p2 = ctrl.promptApproval({ toolName: 'read_file', reason: 'inspect config' });
   assert.equal(ctrl.handleInputLine('a'), true);
   assert.equal(await p2, 'allowed-once');
-  assert.equal(ctrl.hasSessionGrant('bash'), true);
-  const p2Repeat = await ctrl.promptApproval({ toolName: 'bash', reason: 'npm test 2' });
+  assert.equal(ctrl.hasSessionGrant('read_file'), true);
+  const p2Repeat = await ctrl.promptApproval({ toolName: 'read_file', reason: 'inspect config 2' });
   assert.equal(p2Repeat, 'allowed-once');
 
   // 3. Multi-question flow with numeric + custom answers
@@ -171,6 +177,8 @@ test('DSH Cordis plugin routes approval/user-questions inline when attached and 
     const planOut = await ctx.nsTui.executeCommand('/plan on');
     assert.equal(planOut?.kind, 'success');
     assert.match(planOut?.text ?? '', /ENABLED/);
+    const guardDenial = ctx.tools.checkGuards({ name: 'edit_file', agent: fakeAgent, arguments: {} } as never);
+    assert.ok(guardDenial, 'PLAN mode should block mutating tools via ctx.tools.guard');
   } finally {
     await fiber.dispose();
   }

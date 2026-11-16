@@ -68,6 +68,7 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown): void 
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
   });
   res.end(JSON.stringify(body));
 }
@@ -382,7 +383,30 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   };
   ctx.provide('nsTui', tuiService);
 
-  // Plan-mode safety context slot when /plan is toggled in interactive UX
+  // Plan-mode safety context slot & live tool guard when /plan is toggled
+  const PLAN_MUTATION_TOOLS = new Set([
+    'edit',
+    'edit_file',
+    'write',
+    'write_file',
+    'patch',
+    'apply_patch',
+    'delete_file',
+    'bash',
+    'shell',
+    'run_command',
+    'exec',
+  ]);
+  const disposers: Array<() => void> = [];
+  disposers.push(
+    ctx.tools.guard((exec) => {
+      if (planMode && PLAN_MUTATION_TOOLS.has(exec.name.toLowerCase())) {
+        return { reason: `Read-only PLAN mode blocks "${exec.name}" (/plan off to resume edits)` };
+      }
+      return undefined;
+    }),
+  );
+
   ctx.systemPrompt.context({
     name: 'ns-tui:mode',
     order: 186,
@@ -475,7 +499,6 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   });
 
   // Safe slash command registration (never throws on duplicate across plugins)
-  const disposers: Array<() => void> = [];
   const regCmd = (
     cmdName: string,
     description: string,
@@ -663,8 +686,12 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   regCmd('resume', 'Resume an existing session (/resume <sessionId>)', async ({ rawInput }) => {
     const sid = rawInput.trim();
     if (!sid) return { kind: 'error', text: 'Usage: /resume <sessionId>' };
-    const out = await tuiService.resume(sid);
-    return { kind: 'success', text: `Resumed session ${out.sessionId}` };
+    try {
+      const out = await tuiService.resume(sid);
+      return { kind: 'success', text: `Resumed session ${out.sessionId}` };
+    } catch (err) {
+      return { kind: 'error', text: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   regCmd('exit', 'Detach TUI client while leaving background host and workers alive', () => {
@@ -675,9 +702,21 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   regCmd('shutdown', 'Stop persistent ns-dsh host cleanly', () => {
     cleanupInteractiveTty();
     setTimeout(() => {
-      void Promise.resolve(activeHandle?.dispose()).catch(() => {}).finally(() => {
-        process.kill(process.pid, 'SIGTERM');
-      });
+      void (async () => {
+        for (const agent of ctx.agents.list()) {
+          if (agent.status === 'running') {
+            try {
+              agent.cancel({ kind: 'disposed' });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        await Promise.resolve(activeHandle?.dispose()).catch(() => {});
+        const root = ctx.root as { stop?: () => Promise<void> } | undefined;
+        await Promise.resolve(root?.stop?.()).catch(() => {});
+        setTimeout(() => process.kill(process.pid, 'SIGTERM'), 50).unref();
+      })();
     }, 25);
     return { kind: 'success', text: 'Shutting down ns-dsh host...' };
   });
@@ -714,7 +753,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
               ],
             });
             return {
-              answered: true,
+              answered: res.answers.length > 0,
               answers: res.answers.map((a) => {
                 const entry: Record<string, string | string[]> = {
                   id: a.id,

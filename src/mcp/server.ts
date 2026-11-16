@@ -66,19 +66,26 @@ const TOOLS = [
   },
 ];
 
+const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
+
 export async function startMcpServer(): Promise<void> {
   const write = (msg: unknown) => process.stdout.write(`${JSON.stringify(msg)}\n`);
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
   for await (const line of rl) {
     if (!line.trim()) continue;
-    let req: { id?: string | number | null; method?: string; params?: Record<string, unknown> };
+    let parsedRaw: unknown;
     try {
-      req = JSON.parse(line);
+      parsedRaw = JSON.parse(line);
     } catch {
       write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       continue;
     }
+    if (!parsedRaw || typeof parsedRaw !== 'object' || Array.isArray(parsedRaw)) {
+      write({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } });
+      continue;
+    }
+    const req = parsedRaw as { id?: string | number | null; method?: string; params?: Record<string, unknown> };
     if (req.method === 'notifications/initialized' || (req.id === undefined && typeof req.method === 'string' && req.method.startsWith('notifications/'))) {
       continue;
     }
@@ -91,12 +98,13 @@ export async function startMcpServer(): Promise<void> {
 
     try {
       if (req.method === 'initialize') {
-        const clientProto = typeof req.params?.protocolVersion === 'string' ? req.params.protocolVersion : '2024-11-05';
+        const reqProto = typeof req.params?.protocolVersion === 'string' ? req.params.protocolVersion : '';
+        const protocolVersion = SUPPORTED_PROTOCOLS.has(reqProto) ? reqProto : '2024-11-05';
         write({
           jsonrpc: '2.0',
           id: req.id,
           result: {
-            protocolVersion: clientProto,
+            protocolVersion,
             capabilities: { tools: {} },
             serverInfo: { name: 'ns-tui', version: PKG_VERSION },
           },
