@@ -232,7 +232,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
 
   const setTtyInteractiveState = (active: boolean) => {
     if (!interactive) return;
-    process.stdin.resume();
+    if (active) process.stdin.resume();
+    else process.stdin.pause();
     if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
       try {
         process.stdin.setRawMode(active);
@@ -1013,7 +1014,6 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
       if (ttyCleaned) return;
       ttyCleaned = true;
       setTtyInteractiveState(false);
-      process.stdin.pause();
       if (onData) process.stdin.off('data', onData);
       if (onResize) process.stdout?.off('resize', onResize);
     };
