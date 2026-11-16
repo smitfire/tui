@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import z from '@deepseek-ai/schemastery';
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -18,6 +18,7 @@ export const Config = z.object({
 const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i;
 const LOOPBACK_HOST_RE = /^(?:127\.\d+\.\d+\.\d+|localhost|\[::1\]|::1)(?::\d+)?$/i;
 const LOOPBACK_REMOTE_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const EPHEMERAL_CONTROL_TOKEN = randomBytes(24).toString('hex');
 function isLoopbackRequest(req, requireControlToken = false) {
     const remoteAddr = req.socket?.remoteAddress;
     if (typeof remoteAddr === 'string' && remoteAddr.length > 0 && !LOOPBACK_REMOTE_ADDRS.has(remoteAddr)) {
@@ -35,15 +36,13 @@ function isLoopbackRequest(req, requireControlToken = false) {
         return false;
     }
     if (requireControlToken) {
-        const expected = process.env.NS_DSH_TUI_TOKEN?.trim();
-        if (expected) {
-            const providedHeader = req.headers['x-ns-tui-token'];
-            const provided = typeof providedHeader === 'string' ? providedHeader.trim() : '';
-            const a = Buffer.from(provided, 'utf8');
-            const b = Buffer.from(expected, 'utf8');
-            if (a.length !== b.length || !timingSafeEqual(a, b))
-                return false;
-        }
+        const expected = process.env.NS_DSH_TUI_TOKEN?.trim() || EPHEMERAL_CONTROL_TOKEN;
+        const providedHeader = req.headers['x-ns-tui-token'];
+        const provided = typeof providedHeader === 'string' ? providedHeader.trim() : '';
+        const a = Buffer.from(provided, 'utf8');
+        const b = Buffer.from(expected, 'utf8');
+        if (a.length !== b.length || !timingSafeEqual(a, b))
+            return false;
     }
     return true;
 }
@@ -342,24 +341,34 @@ export function apply(ctx, rawConfig = {}) {
         pendingInteractions: () => interactions.pending(),
     };
     ctx.provide('nsTui', tuiService);
-    // Plan-mode safety context slot & live tool guard when /plan is toggled
-    const PLAN_MUTATION_TOOLS = new Set([
-        'edit',
-        'edit_file',
-        'write',
-        'write_file',
-        'patch',
-        'apply_patch',
-        'delete_file',
-        'bash',
-        'shell',
-        'run_command',
-        'exec',
+    // Fail-closed read-only PLAN mode guard: permit only known read-only inspection tools
+    const PLAN_READONLY_TOOLS = new Set([
+        'read',
+        'read_file',
+        'glob',
+        'grep',
+        'search',
+        'find',
+        'list',
+        'ls',
+        'view',
+        'forewisp_search',
+        'forewisp_expand',
+        'ctx_search',
+        'ctx_slice',
+        'vars_list',
+        'board_view',
+        'board_list',
+        'switchyard_status',
+        'cuga_evaluate_policy',
+        'cuga_evaluate_intent',
+        'cuga_classify_reasoning',
+        'ns_ask_user',
     ]);
     const disposers = [];
     disposers.push(ctx.tools.guard((exec) => {
-        if (planMode && PLAN_MUTATION_TOOLS.has(exec.name.toLowerCase())) {
-            return { reason: `Read-only PLAN mode blocks "${exec.name}" (/plan off to resume edits)` };
+        if (planMode && !PLAN_READONLY_TOOLS.has(exec.name.toLowerCase())) {
+            return { reason: `Read-only PLAN mode only allows read-only tools; blocked "${exec.name}" (/plan off to resume)` };
         }
         return undefined;
     }));

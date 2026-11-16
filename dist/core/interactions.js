@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { renderApprovalBox, renderQuestionBox } from './renderer.js';
-const HIGH_RISK_TOOLS = new Set(['bash', 'shell', 'exec', 'run_command']);
+const HIGH_RISK_EXACT = new Set(['bash', 'shell', 'exec', 'run_command', 'terminal']);
+const HIGH_RISK_PREFIXES = ['write', 'edit', 'patch', 'delete', 'rm', 'run_'];
 function isSessionGrantEligible(toolName, code) {
     if (code?.startsWith('CUGA_'))
         return false;
-    return !HIGH_RISK_TOOLS.has(toolName.toLowerCase());
+    const norm = toolName.trim().toLowerCase();
+    if (!norm || HIGH_RISK_EXACT.has(norm))
+        return false;
+    return !HIGH_RISK_PREFIXES.some((p) => norm.startsWith(p));
 }
 export class TerminalInteractionController {
     sessionAllowedTools = new Set();
@@ -52,19 +56,19 @@ export class TerminalInteractionController {
         };
         return new Promise((resolve) => {
             let settled = false;
-            const onAbort = () => {
-                if (settled)
-                    return;
-                settled = true;
-                cleanup();
-                resolve('cancelled');
-            };
             const cleanup = () => {
                 if (this.activeApproval?.prompt.id === prompt.id) {
                     this.activeApproval = null;
                 }
                 req.signal?.removeEventListener('abort', onAbort);
             };
+            function onAbort() {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                resolve('cancelled');
+            }
             if (req.signal)
                 req.signal.addEventListener('abort', onAbort, { once: true });
             this.activeApproval = {
@@ -98,19 +102,19 @@ export class TerminalInteractionController {
         };
         return new Promise((resolve) => {
             let settled = false;
-            const onAbort = () => {
-                if (settled)
-                    return;
-                settled = true;
-                cleanup();
-                resolve({ cancelled: true, answers: [] });
-            };
             const cleanup = () => {
                 if (this.activeQuestion?.prompt.id === prompt.id) {
                     this.activeQuestion = null;
                 }
                 req.signal?.removeEventListener('abort', onAbort);
             };
+            function onAbort() {
+                if (settled)
+                    return;
+                settled = true;
+                cleanup();
+                resolve({ cancelled: true, answers: [] });
+            }
             if (req.signal)
                 req.signal.addEventListener('abort', onAbort, { once: true });
             this.activeQuestion = {

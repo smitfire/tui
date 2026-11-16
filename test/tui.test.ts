@@ -235,6 +235,8 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
   });
 
   let detachedCalled = 0;
+  const prevTok = process.env.NS_DSH_TUI_TOKEN;
+  process.env.NS_DSH_TUI_TOKEN = 'test-secret-token';
   const fiber = ctx.plugin(tuiPlugin, {
     interactive: true,
     appName: 'ns-dsh',
@@ -291,6 +293,7 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
   // Loopback HTTP tests
   const attachOn = await callHttp('/ns-tui/api/attach', {
     method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': process.env.NS_DSH_TUI_TOKEN ?? 'test-secret-token' },
     body: JSON.stringify({ attached: true }),
   });
   assert.equal(attachOn.status, 200);
@@ -316,45 +319,42 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
   });
   assert.equal(stRemoteErr.status, 403);
 
-  const prevTok = process.env.NS_DSH_TUI_TOKEN;
-  process.env.NS_DSH_TUI_TOKEN = 'test-secret-token';
-  try {
-    const missingTok = await callHttp('/ns-tui/api/attach', {
-      method: 'POST',
-      body: JSON.stringify({ attached: true }),
-    });
-    assert.equal(missingTok.status, 403);
-    const validTok = await callHttp('/ns-tui/api/attach', {
-      method: 'POST',
-      headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
-      body: JSON.stringify({ attached: true }),
-    });
-    assert.equal(validTok.status, 200);
-  } finally {
-    if (prevTok === undefined) delete process.env.NS_DSH_TUI_TOKEN;
-    else process.env.NS_DSH_TUI_TOKEN = prevTok;
-  }
+  const missingTok = await callHttp('/ns-tui/api/attach', {
+    method: 'POST',
+    body: JSON.stringify({ attached: true }),
+  });
+  assert.equal(missingTok.status, 403);
+  const validTok = await callHttp('/ns-tui/api/attach', {
+    method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
+    body: JSON.stringify({ attached: true }),
+  });
+  assert.equal(validTok.status, 200);
 
   const attachBadJson = await callHttp('/ns-tui/api/attach', {
     method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
     body: '{bad json',
   });
   assert.equal(attachBadJson.status, 400);
 
   const attachTooBig = await callHttp('/ns-tui/api/attach', {
     method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
     body: 'x'.repeat(40_000),
   });
   assert.equal(attachTooBig.status, 413);
 
   const resumeMissing = await callHttp('/ns-tui/api/resume', {
     method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
     body: '{}',
   });
   assert.equal(resumeMissing.status, 400);
 
   const resumeOk = await callHttp('/ns-tui/api/resume', {
     method: 'POST',
+    headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
     body: JSON.stringify({ sessionId: 'sess-tui-2' }),
   });
   assert.equal(resumeOk.status, 200);
@@ -429,6 +429,8 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
     assert.equal(ctx.nsTui.isAttached(), false);
     assert.equal(detachedCalled, 1);
   } finally {
+    if (prevTok === undefined) delete process.env.NS_DSH_TUI_TOKEN;
+    else process.env.NS_DSH_TUI_TOKEN = prevTok;
     await fiber.dispose();
   }
 });

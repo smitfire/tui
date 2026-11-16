@@ -64,6 +64,8 @@ const TOOLS = [
         },
     },
 ];
+class ValidationError extends Error {
+}
 const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
 export async function startMcpServer() {
     const write = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -111,24 +113,28 @@ export async function startMcpServer() {
                 write({ jsonrpc: '2.0', id: req.id, result: { tools: TOOLS } });
             }
             else if (req.method === 'tools/call') {
+                const params = (req.params ?? {});
+                const toolName = typeof params.name === 'string' ? params.name : '';
+                const rawArgs = params.arguments;
+                if (!toolName) {
+                    write({ jsonrpc: '2.0', id: req.id, error: { code: -32602, message: 'Invalid params: tool name is required' } });
+                    continue;
+                }
+                if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null || Array.isArray(rawArgs))) {
+                    write({
+                        jsonrpc: '2.0',
+                        id: req.id,
+                        error: { code: -32602, message: 'Invalid params: arguments must be an object' },
+                    });
+                    continue;
+                }
+                const a = rawArgs ?? {};
                 try {
-                    const params = (req.params ?? {});
-                    const toolName = params.name ?? '';
-                    const rawArgs = params.arguments;
-                    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null || Array.isArray(rawArgs))) {
-                        write({
-                            jsonrpc: '2.0',
-                            id: req.id,
-                            error: { code: -32602, message: 'Invalid params: arguments must be an object' },
-                        });
-                        continue;
-                    }
-                    const a = rawArgs ?? {};
                     let out;
                     if (toolName === 'tui_format_status') {
                         const modelName = typeof a.model === 'string' ? a.model.trim() : '';
                         if (!modelName) {
-                            throw new Error('model string is required');
+                            throw new ValidationError('model string is required');
                         }
                         const cols = Number.isFinite(a.columns) ? Math.max(40, Math.min(400, Math.trunc(Number(a.columns)))) : 100;
                         const snap = {
@@ -152,13 +158,13 @@ export async function startMcpServer() {
                     }
                     else if (toolName === 'tui_format_diff') {
                         if (typeof a.path !== 'string' || typeof a.newText !== 'string') {
-                            throw new Error('path and newText strings are required');
+                            throw new ValidationError('path and newText strings are required');
                         }
                         if (a.newText.length > 262_144 || (typeof a.oldText === 'string' && a.oldText.length > 262_144)) {
-                            throw new Error('Diff text exceeds 256KB display cap');
+                            throw new ValidationError('Diff text exceeds 256KB display cap');
                         }
                         if (a.oldText !== undefined && a.oldText !== null && typeof a.oldText !== 'string') {
-                            throw new Error('oldText must be a string or null');
+                            throw new ValidationError('oldText must be a string or null');
                         }
                         const maxLines = Number.isFinite(a.maxLines) ? Math.max(4, Math.min(500, Math.trunc(Number(a.maxLines)))) : 24;
                         out = {
@@ -171,7 +177,7 @@ export async function startMcpServer() {
                     }
                     else if (toolName === 'tui_parse_command') {
                         if (typeof a.line !== 'string')
-                            throw new Error('line string is required');
+                            throw new ValidationError('line string is required');
                         const parsed = parseCommand(a.line);
                         out = {
                             isCommand: Boolean(parsed),
@@ -180,7 +186,7 @@ export async function startMcpServer() {
                         };
                     }
                     else {
-                        throw new Error(`Unknown tool: ${toolName}`);
+                        throw new ValidationError(`Unknown tool: ${toolName}`);
                     }
                     write({
                         jsonrpc: '2.0',
@@ -189,14 +195,22 @@ export async function startMcpServer() {
                     });
                 }
                 catch (toolErr) {
-                    write({
-                        jsonrpc: '2.0',
-                        id: req.id,
-                        result: {
-                            content: [{ type: 'text', text: toolErr instanceof Error ? toolErr.message : String(toolErr) }],
-                            isError: true,
-                        },
-                    });
+                    if (toolErr instanceof ValidationError) {
+                        write({
+                            jsonrpc: '2.0',
+                            id: req.id,
+                            error: { code: -32602, message: toolErr.message },
+                        });
+                    }
+                    else {
+                        const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+                        process.stderr.write(`ns-tui MCP internal tool error: ${msg}\n`);
+                        write({
+                            jsonrpc: '2.0',
+                            id: req.id,
+                            error: { code: -32603, message: msg },
+                        });
+                    }
                 }
             }
             else if (req.method === 'ping') {
