@@ -24,10 +24,37 @@ function paint(text: string, ansi: string, noColor?: boolean): string {
   return `${ansi}${text}${RESET}`;
 }
 
+const ANSI_CSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+function visibleLength(text: string): number {
+  return text.replace(ANSI_CSI_RE, '').length;
+}
+
 export function clampColumns(text: string, columns = 100): string {
-  const width = Math.max(40, columns);
-  if (text.length <= width) return text;
-  return `${text.slice(0, width - 1)}…`;
+  const width = Math.max(40, Number.isFinite(columns) ? Math.trunc(columns) : 100);
+  if (visibleLength(text) <= width) return text;
+  const maxVisible = width - 1;
+  let visible = 0;
+  let i = 0;
+  let out = '';
+  let sawAnsi = false;
+  while (i < text.length && visible < maxVisible) {
+    if (text[i] === '\x1b' && text[i + 1] === '[') {
+      const m = text.slice(i).match(/^\x1b\[[0-9;]*[A-Za-z]/);
+      if (m) {
+        out += m[0];
+        i += m[0].length;
+        sawAnsi = true;
+        continue;
+      }
+    }
+    const cp = text.codePointAt(i)!;
+    const ch = String.fromCodePoint(cp);
+    out += ch;
+    i += ch.length;
+    visible += 1;
+  }
+  return `${out}…${sawAnsi ? RESET : ''}`;
 }
 
 export function renderHeader(status: TuiStatusSnapshot, columns = 100, noColor?: boolean): string {
@@ -78,21 +105,30 @@ export function renderDiffBlock(
 
   const maxLen = Math.max(oldLines.length, newLines.length);
   let shown = 0;
-  for (let i = 0; i < maxLen && shown < maxLines; i += 1) {
+  let remainingChanged = 0;
+  for (let i = 0; i < maxLen; i += 1) {
     const a = oldLines[i];
     const b = newLines[i];
     if (a === b) continue;
-    if (a !== undefined && shown < maxLines) {
-      out.push(paint(`  - ${clampColumns(a, columns - 6)}`, RED, opts.noColor));
-      shown += 1;
+    if (a !== undefined) {
+      if (shown < maxLines) {
+        out.push(paint(`  - ${clampColumns(a, columns - 6)}`, RED, opts.noColor));
+        shown += 1;
+      } else {
+        remainingChanged += 1;
+      }
     }
-    if (b !== undefined && shown < maxLines) {
-      out.push(paint(`  + ${clampColumns(b, columns - 6)}`, GREEN, opts.noColor));
-      shown += 1;
+    if (b !== undefined) {
+      if (shown < maxLines) {
+        out.push(paint(`  + ${clampColumns(b, columns - 6)}`, GREEN, opts.noColor));
+        shown += 1;
+      } else {
+        remainingChanged += 1;
+      }
     }
   }
-  if (maxLen > shown && shown >= maxLines) {
-    out.push(paint(`  … (${maxLen - shown} more changed lines; use /diff to inspect full patch)`, DIM, opts.noColor));
+  if (remainingChanged > 0) {
+    out.push(paint(`  … (${remainingChanged} more changed lines; use /diff to inspect full patch)`, DIM, opts.noColor));
   }
   return out.join('\n');
 }

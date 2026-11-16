@@ -1,4 +1,3 @@
 - insert:
     - id: ns-tui
       name: '@smitfire/tui'
-      disabled: !!js process.env.NS_DSH_TUI !== '1'

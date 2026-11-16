@@ -366,6 +366,23 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
   assert.equal(helpOut?.kind, 'success');
   assert.match(helpOut?.text ?? '', /\/exit/);
 
+  // tools/result populates diff badge -> /diff renders patch
+  ctx.emit(
+    'tools/result',
+    { name: 'edit_file', arguments: { path: 'src/auth.ts', oldText: 'old()', newText: 'new()' } } as never,
+    { isError: false, content: [{ type: 'text', text: 'edited auth.ts' }] } as never,
+  );
+  const diffOut = await ctx.nsTui.executeCommand('/diff auth.ts');
+  assert.equal(diffOut?.kind, 'success');
+  assert.match(diffOut?.text ?? '', /\+ new\(\)/);
+
+  const badEffort = await ctx.nsTui.executeCommand('/model openai-codex/gpt-6-luna bogus');
+  assert.equal(badEffort?.kind, 'error');
+
+  const histOut = await ctx.nsTui.executeCommand('/history');
+  assert.equal(histOut?.kind, 'success');
+  assert.match(histOut?.text ?? '', /Hello agent/);
+
     const exitOut = await ctx.nsTui.executeCommand('/exit');
     assert.equal(exitOut?.kind, 'success');
     assert.equal(ctx.nsTui.isAttached(), false);

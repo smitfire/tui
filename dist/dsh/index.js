@@ -49,8 +49,8 @@ async function readJsonBody(req, limitBytes = 32_768) {
         req.on('data', (c) => {
             total += c.length;
             if (total > limitBytes) {
-                req.pause();
                 fail(Object.assign(new Error('request body exceeds 32KB limit'), { statusCode: 413 }));
+                req.destroy();
                 return;
             }
             if (!settled)
@@ -72,9 +72,15 @@ async function readJsonBody(req, limitBytes = 32_768) {
         req.on('aborted', () => fail(Object.assign(new Error('request aborted'), { statusCode: 400 })));
     });
 }
+const GIT_BRANCH_CACHE = new Map();
 function readGitBranch(cwd) {
+    const now = Date.now();
+    const hit = GIT_BRANCH_CACHE.get(cwd);
+    if (hit && now - hit.at < 3000)
+        return hit.value;
+    let value;
     try {
-        return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        value = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
             cwd,
             encoding: 'utf8',
             timeout: 1500,
@@ -82,8 +88,40 @@ function readGitBranch(cwd) {
         }).trim();
     }
     catch {
-        return undefined;
+        value = undefined;
     }
+    GIT_BRANCH_CACHE.set(cwd, { value, at: now });
+    return value;
+}
+const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
+function extractDiffFromToolArgs(toolName, rawArgs) {
+    if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs))
+        return undefined;
+    const a = rawArgs;
+    const path = typeof a.file_path === 'string' ? a.file_path : typeof a.path === 'string' ? a.path : undefined;
+    if (!path)
+        return undefined;
+    const newText = typeof a.new_string === 'string'
+        ? a.new_string
+        : typeof a.newText === 'string'
+            ? a.newText
+            : typeof a.content === 'string'
+                ? a.content
+                : typeof a.replacement === 'string'
+                    ? a.replacement
+                    : undefined;
+    if (newText === undefined)
+        return undefined;
+    const oldText = typeof a.old_string === 'string'
+        ? a.old_string
+        : typeof a.oldText === 'string'
+            ? a.oldText
+            : typeof a.target === 'string'
+                ? a.target
+                : toolName.toLowerCase().includes('write')
+                    ? null
+                    : '';
+    return { path, oldText, newText };
 }
 export function apply(ctx, rawConfig = {}) {
     const interactive = rawConfig.interactive ?? process.env.NS_DSH_TUI === '1';
@@ -111,6 +149,7 @@ export function apply(ctx, rawConfig = {}) {
             }
         }
     };
+    let cleanupInteractiveTty = () => { };
     const interactions = new TerminalInteractionController({
         write: writeOut,
         columns: cols,
@@ -162,22 +201,28 @@ export function apply(ctx, rawConfig = {}) {
         writeOut(`\n${renderFooter(buildStatus(), cols())}\n❯ ${lineBuffer}`);
     };
     const ensureRootAgent = async (resumeId) => {
+        const prevSid = activeAgent ? String(activeAgent.session.id) : undefined;
+        const setActive = (agent, handle) => {
+            const nextSid = String(agent.session.id);
+            if (prevSid && prevSid !== nextSid)
+                interactions.clearSessionGrants();
+            if (handle)
+                activeHandle = handle;
+            activeAgent = agent;
+            return agent;
+        };
         const existing = resolveRootAgent();
         if (!resumeId && existing) {
-            activeAgent = existing;
-            return existing;
+            return setActive(existing);
         }
         if (resumeId) {
             const live = ctx.agents.get(SessionId(resumeId));
             if (live) {
-                activeAgent = live;
-                return live;
+                return setActive(live);
             }
             if (ctx.get('sessionPersistence')) {
                 const resumed = await ctx.agents.resume({ resumeSessionId: SessionId(resumeId) });
-                activeHandle = resumed;
-                activeAgent = resumed.agent;
-                return resumed.agent;
+                return setActive(resumed.agent, resumed);
             }
         }
         const sid = SessionId(randomUUID());
@@ -185,20 +230,9 @@ export function apply(ctx, rawConfig = {}) {
             sessionId: sid,
             meta: { cwd: process.cwd() },
         });
-        activeHandle = handle;
-        activeAgent = handle.agent;
-        return handle.agent;
+        return setActive(handle.agent, handle);
     };
-    const submitPrompt = async (text) => {
-        const trimmed = text.trim();
-        if (!trimmed)
-            return;
-        if (trimmed.startsWith('/')) {
-            const result = await executeCommand(trimmed);
-            if (result)
-                writeOut(`\n${result.text}\n`);
-            return;
-        }
+    const dispatchPromptText = async (trimmed) => {
         promptHistory.push(trimmed);
         if (promptHistory.length > 100)
             promptHistory.shift();
@@ -210,6 +244,18 @@ export function apply(ctx, rawConfig = {}) {
             content: [{ type: 'text', text: content }],
             source: { kind: 'user' },
         }));
+    };
+    const submitPrompt = async (text) => {
+        const trimmed = text.trim();
+        if (!trimmed)
+            return;
+        if (trimmed.startsWith('/')) {
+            const result = await executeCommand(trimmed);
+            if (result)
+                writeOut(`\n${result.text}\n`);
+            return;
+        }
+        await dispatchPromptText(trimmed);
     };
     const executeCommand = async (line) => {
         const agent = resolveRootAgent() ?? (await ensureRootAgent());
@@ -238,6 +284,7 @@ export function apply(ctx, rawConfig = {}) {
         detach: () => {
             attached = false;
             interactions.handleCtrlC();
+            interactions.clearSessionGrants();
             const tmuxSock = process.env.NS_DSH_TMUX_SOCKET;
             if (tmuxSock) {
                 try {
@@ -314,13 +361,14 @@ export function apply(ctx, rawConfig = {}) {
         return { answers: res.answers };
     }, { prepend: true });
     // Live streaming output, tool badges, PTC savings, and usage telemetry
-    let activeAttemptId;
+    const activeAttemptIds = new Set();
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {
         const root = resolveRootAgent();
         if (root && agent.id !== root.id)
             return;
+        const attemptId = String(frame.attemptId);
         if (frame.type === 'start') {
-            activeAttemptId = String(frame.attemptId);
+            activeAttemptIds.add(attemptId);
             writeOut('\n');
         }
         else if (frame.type === 'chunk') {
@@ -332,9 +380,10 @@ export function apply(ctx, rawConfig = {}) {
                 totalTokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
             }
         }
-        else if (frame.type === 'end' && String(frame.attemptId) === activeAttemptId) {
-            activeAttemptId = undefined;
-            renderPromptLine();
+        else if (frame.type === 'end') {
+            activeAttemptIds.delete(attemptId);
+            if (activeAttemptIds.size === 0)
+                renderPromptLine();
         }
     });
     ctx.on('tools/result', (exec, result) => {
@@ -346,10 +395,12 @@ export function apply(ctx, rawConfig = {}) {
             .slice(0, 120);
         if (textPreview.includes('CUGA_'))
             cugaBlocks += 1;
+        const diff = extractDiffFromToolArgs(exec.name, exec.arguments);
         const badge = {
             toolName: exec.name,
             summary: textPreview || (isErr ? 'error' : 'ok'),
             ok: !isErr,
+            ...(diff ? { diff } : {}),
         };
         recentBadges.push(badge);
         if (recentBadges.length > 30)
@@ -404,10 +455,10 @@ export function apply(ctx, rawConfig = {}) {
             return { kind: 'success', text: `Plan mode ${planMode ? 'ENABLED (read-only)' : 'DISABLED'}.` };
         }
         planMode = true;
-        await submitPrompt(arg);
+        await dispatchPromptText(arg);
         return { kind: 'success', text: `Submitted planning prompt in PLAN mode.` };
     });
-    regCmd('tasks', 'List Kanban board tasks', () => {
+    const listBoardHandler = () => {
         const nsBoard = ctx.get('nsBoard');
         if (!nsBoard?.snapshot)
             return { kind: 'error', text: 'ns-board service is unavailable' };
@@ -420,7 +471,9 @@ export function apply(ctx, rawConfig = {}) {
                 .map((c) => `${c.id} | ${c.column} | ${c.owner} | ${c.title}${c.blockedBy.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : ''}`)
                 .join('\n'),
         };
-    });
+    };
+    regCmd('tasks', 'List Kanban board tasks', listBoardHandler);
+    regCmd('board', 'List Kanban board cards & dependencies', listBoardHandler);
     for (const op of ['pickup', 'pause', 'resume-task', 'cancel']) {
         regCmd(op, `${op} Kanban card <cardId>`, ({ rawInput }) => {
             const cardId = rawInput.trim();
@@ -482,14 +535,26 @@ export function apply(ctx, rawConfig = {}) {
         if (!nsTeam?.router?.stateFor)
             return { kind: 'error', text: 'ns-team unavailable' };
         const sid = tuiService.activeSessionId() ?? 'default';
-        return { kind: 'success', text: JSON.stringify(nsTeam.router.stateFor(sid), null, 2) };
+        const state = nsTeam.router.stateFor(sid);
+        const toml = nsTeam.exportRoutesToml?.();
+        return {
+            kind: 'success',
+            text: JSON.stringify(toml ? { ...state, routesTomlPreview: toml.split('\n').slice(0, 8) } : state, null, 2),
+        };
     });
+    regCmd('history', 'Show recent prompts entered in this TUI', () => ({
+        kind: 'success',
+        text: promptHistory.length ? promptHistory.map((p, i) => `${i + 1}. ${p}`).join('\n') : 'No prompts submitted yet.',
+    }));
     regCmd('model', 'Inspect or switch provider/model/effort (/model <provider>/<model> [effort])', ({ agent, rawInput }) => {
         const trimmed = rawInput.trim();
         if (!trimmed) {
             return { kind: 'success', text: JSON.stringify(agent.model.current() ?? null) };
         }
         const [routeSpec, effort] = trimmed.split(/\s+/);
+        if (effort && !VALID_EFFORTS.has(effort)) {
+            return { kind: 'error', text: `Invalid effort "${effort}". Expected one of: low, medium, high, max.` };
+        }
         const slash = routeSpec.indexOf('/');
         const provider = slash > 0 ? routeSpec.slice(0, slash) : agent.model.current()?.provider ?? 'google-antigravity';
         const model = slash > 0 ? routeSpec.slice(slash + 1) : routeSpec;
@@ -516,10 +581,12 @@ export function apply(ctx, rawConfig = {}) {
         return { kind: 'success', text: 'Detached TUI client; background host remains active.' };
     });
     regCmd('shutdown', 'Stop persistent ns-dsh host cleanly', () => {
-        setImmediate(() => {
-            void activeHandle?.dispose().catch(() => { });
-            process.kill(process.pid, 'SIGTERM');
-        });
+        cleanupInteractiveTty();
+        setTimeout(() => {
+            void Promise.resolve(activeHandle?.dispose()).catch(() => { }).finally(() => {
+                process.kill(process.pid, 'SIGTERM');
+            });
+        }, 25);
         return { kind: 'success', text: 'Shutting down ns-dsh host...' };
     });
     // Register interactive tool so model can ask questions via ctx.userQuestions (inline when attached, WebUI when detached)
@@ -723,9 +790,11 @@ export function apply(ctx, rawConfig = {}) {
             }
         };
         process.stdin.on('data', onData);
-    }
-    ctx.effect(() => () => {
-        if (interactive) {
+        let ttyCleaned = false;
+        cleanupInteractiveTty = () => {
+            if (ttyCleaned)
+                return;
+            ttyCleaned = true;
             writeOut('\x1b[?2004l');
             if (onData)
                 process.stdin.off('data', onData);
@@ -740,7 +809,11 @@ export function apply(ctx, rawConfig = {}) {
                     /* ignore */
                 }
             }
-        }
+        };
+    }
+    ctx.effect(() => () => {
+        if (interactive)
+            cleanupInteractiveTty();
         interactions.clearSessionGrants();
         for (const d of disposers)
             d();

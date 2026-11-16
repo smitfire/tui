@@ -1,7 +1,18 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { parseCommand } from '@deepseek-ai/dsh-commands';
 import { renderDiffBlock, renderFooter, renderHeader, type TuiStatusSnapshot } from '../core/index.js';
+
+const PKG_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: string };
+    return pkg.version ?? '0.1.0';
+  } catch {
+    return '0.1.0';
+  }
+})();
 
 const TOOLS = [
   {
@@ -16,8 +27,16 @@ const TOOLS = [
         effort: { type: 'string' },
         branch: { type: 'string' },
         columns: { type: 'integer' },
+        planMode: { type: 'boolean' },
+        switchyardTier: { type: 'string' },
+        contextPercent: { type: 'number' },
+        forewispStrategy: { type: 'string' },
+        forewispOffers: { type: 'integer' },
+        cugaMode: { type: 'string' },
+        tokensUsed: { type: 'integer' },
+        running: { type: 'boolean' },
       },
-      required: ['cwd', 'sessionId', 'model'],
+      required: ['model'],
     },
   },
   {
@@ -36,7 +55,7 @@ const TOOLS = [
   },
   {
     name: 'tui_parse_command',
-    description: 'Parse a TUI slash command line into { name, rawInput }.',
+    description: 'Parse a TUI slash command line into { isCommand, name, rawInput }.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -46,14 +65,6 @@ const TOOLS = [
     },
   },
 ];
-
-class RpcParamError extends Error {
-  readonly code: number;
-  constructor(code: number, message: string) {
-    super(message);
-    this.code = code;
-  }
-}
 
 export async function startMcpServer(): Promise<void> {
   const write = (msg: unknown) => process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -65,85 +76,119 @@ export async function startMcpServer(): Promise<void> {
     try {
       req = JSON.parse(line);
     } catch {
+      write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       continue;
     }
-    if (req.id === undefined || req.method === undefined) continue;
+    if (req.method === 'notifications/initialized' || (req.id === undefined && typeof req.method === 'string' && req.method.startsWith('notifications/'))) {
+      continue;
+    }
+    if (req.id === undefined || typeof req.method !== 'string') {
+      if (req.id !== undefined) {
+        write({ jsonrpc: '2.0', id: req.id, error: { code: -32600, message: 'Invalid Request' } });
+      }
+      continue;
+    }
 
     try {
       if (req.method === 'initialize') {
+        const clientProto = typeof req.params?.protocolVersion === 'string' ? req.params.protocolVersion : '2024-11-05';
         write({
           jsonrpc: '2.0',
           id: req.id,
           result: {
-            protocolVersion: '2024-11-05',
+            protocolVersion: clientProto,
             capabilities: { tools: {} },
-            serverInfo: { name: 'ns-tui', version: '0.1.0' },
+            serverInfo: { name: 'ns-tui', version: PKG_VERSION },
           },
         });
-      } else if (req.method === 'notifications/initialized') {
-        continue;
       } else if (req.method === 'tools/list') {
         write({ jsonrpc: '2.0', id: req.id, result: { tools: TOOLS } });
       } else if (req.method === 'tools/call') {
-        const params = (req.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
-        const toolName = params.name ?? '';
-        const a = params.arguments ?? {};
-        let out: unknown;
-        if (toolName === 'tui_format_status') {
-          if (typeof a.cwd !== 'string' || typeof a.sessionId !== 'string' || typeof a.model !== 'string') {
-            throw new RpcParamError(-32602, 'cwd, sessionId, and model strings are required');
+        try {
+          const params = (req.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+          const toolName = params.name ?? '';
+          const a = params.arguments ?? {};
+          let out: unknown;
+          if (toolName === 'tui_format_status') {
+            if (typeof a.model !== 'string' || !a.model.trim()) {
+              throw new Error('model string is required');
+            }
+            const cols = Number.isFinite(a.columns) ? Math.max(40, Math.min(400, Math.trunc(Number(a.columns)))) : 100;
+            const snap: TuiStatusSnapshot = {
+              cwd: typeof a.cwd === 'string' && a.cwd ? a.cwd : process.cwd(),
+              sessionId: typeof a.sessionId === 'string' && a.sessionId ? a.sessionId : 'new',
+              model: a.model,
+              effort: typeof a.effort === 'string' ? a.effort : undefined,
+              branch: typeof a.branch === 'string' ? a.branch : undefined,
+              planMode: typeof a.planMode === 'boolean' ? a.planMode : undefined,
+              switchyardTier: typeof a.switchyardTier === 'string' ? a.switchyardTier : undefined,
+              contextPercent: typeof a.contextPercent === 'number' ? a.contextPercent : undefined,
+              forewispStrategy: typeof a.forewispStrategy === 'string' ? a.forewispStrategy : undefined,
+              forewispOffers: typeof a.forewispOffers === 'number' ? a.forewispOffers : undefined,
+              cugaMode: typeof a.cugaMode === 'string' ? a.cugaMode : undefined,
+              tokensUsed: typeof a.tokensUsed === 'number' ? a.tokensUsed : undefined,
+              running: typeof a.running === 'boolean' ? a.running : undefined,
+            };
+            out = {
+              rendered: `${renderHeader(snap, cols, true)}\n${renderFooter(snap, cols, true)}`,
+            };
+          } else if (toolName === 'tui_format_diff') {
+            if (typeof a.path !== 'string' || typeof a.newText !== 'string') {
+              throw new Error('path and newText strings are required');
+            }
+            const maxLines = Number.isFinite(a.maxLines) ? Math.max(4, Math.min(500, Math.trunc(Number(a.maxLines)))) : 24;
+            out = {
+              rendered: renderDiffBlock(
+                {
+                  path: a.path,
+                  oldText: typeof a.oldText === 'string' ? a.oldText : null,
+                  newText: a.newText,
+                },
+                { maxLines, noColor: true },
+              ),
+            };
+          } else if (toolName === 'tui_parse_command') {
+            if (typeof a.line !== 'string') throw new Error('line string is required');
+            const parsed = parseCommand(a.line);
+            out = {
+              isCommand: Boolean(parsed),
+              name: parsed?.name ?? null,
+              rawInput: parsed?.rawInput ?? '',
+            };
+          } else {
+            throw new Error(`Unknown tool: ${toolName}`);
           }
-          const cols = typeof a.columns === 'number' ? a.columns : 100;
-          const snap: TuiStatusSnapshot = {
-            cwd: a.cwd,
-            sessionId: a.sessionId,
-            model: a.model,
-            effort: typeof a.effort === 'string' ? a.effort : undefined,
-            branch: typeof a.branch === 'string' ? a.branch : undefined,
-          };
-          out = {
-            rendered: `${renderHeader(snap, cols, true)}\n${renderFooter(snap, cols, true)}`,
-          };
-        } else if (toolName === 'tui_format_diff') {
-          if (typeof a.path !== 'string' || typeof a.newText !== 'string') {
-            throw new RpcParamError(-32602, 'path and newText strings are required');
-          }
-          out = {
-            rendered: renderDiffBlock(
-              {
-                path: a.path,
-                oldText: typeof a.oldText === 'string' ? a.oldText : null,
-                newText: a.newText,
-              },
-              { maxLines: typeof a.maxLines === 'number' ? a.maxLines : 24, noColor: true },
-            ),
-          };
-        } else if (toolName === 'tui_parse_command') {
-          if (typeof a.line !== 'string') throw new RpcParamError(-32602, 'line string is required');
-          const m = a.line.trim().match(/^\/([a-z0-9-]+)(?:\s+(.*))?$/i);
-          out = m ? { isCommand: true, name: m[1].toLowerCase(), rawInput: m[2] ?? '' } : { isCommand: false };
-        } else {
-          throw new RpcParamError(-32602, `Unknown tool: ${toolName}`);
+          write({
+            jsonrpc: '2.0',
+            id: req.id,
+            result: { content: [{ type: 'text', text: JSON.stringify(out) }] },
+          });
+        } catch (toolErr) {
+          write({
+            jsonrpc: '2.0',
+            id: req.id,
+            result: {
+              content: [{ type: 'text', text: toolErr instanceof Error ? toolErr.message : String(toolErr) }],
+              isError: true,
+            },
+          });
         }
-        write({
-          jsonrpc: '2.0',
-          id: req.id,
-          result: { content: [{ type: 'text', text: JSON.stringify(out) }] },
-        });
       } else {
         write({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: `Method not found: ${req.method}` } });
       }
     } catch (err) {
-      const code = err instanceof RpcParamError ? err.code : -32603;
       write({
         jsonrpc: '2.0',
         id: req.id,
-        error: { code, message: err instanceof Error ? err.message : String(err) },
+        error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
       });
     }
   }
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  void startMcpServer();
+  startMcpServer().catch((err) => {
+    process.stderr.write(`ns-tui MCP server fatal error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
 }
