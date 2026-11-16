@@ -55,8 +55,12 @@ export class TerminalInteractionController {
     return Boolean(this.activeApproval || this.activeQuestion);
   }
 
+  private static grantKey(toolName: string): string {
+    return toolName.trim().toLowerCase();
+  }
+
   hasSessionGrant(toolName: string, code?: string): boolean {
-    return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(toolName);
+    return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(TerminalInteractionController.grantKey(toolName));
   }
 
   clearSessionGrants(): void {
@@ -71,7 +75,7 @@ export class TerminalInteractionController {
     signal?: AbortSignal;
   }): Promise<ApprovalOutcome> {
     if (req.signal?.aborted) return 'cancelled';
-    if (isSessionGrantEligible(req.toolName, req.code) && this.sessionAllowedTools.has(req.toolName)) {
+    if (this.hasSessionGrant(req.toolName, req.code)) {
       return 'allowed-once';
     }
 
@@ -208,7 +212,7 @@ export class TerminalInteractionController {
           this.writeFn(`[One-off approval only for high-risk tool: ${approval.prompt.toolName}; enter [y] once or [n] deny]\n`);
           return true;
         }
-        this.sessionAllowedTools.add(approval.prompt.toolName);
+        this.sessionAllowedTools.add(TerminalInteractionController.grantKey(approval.prompt.toolName));
         this.writeFn(`[Allowed for session: ${approval.prompt.toolName}]\n`);
         approval.resolve('allowed-once');
         return true;

@@ -169,19 +169,31 @@ function pickStringField(obj: Record<string, unknown>, keys: readonly string[]):
   return undefined;
 }
 
+const DIFF_TOOL_KINDS = new Map<string, 'edit' | 'write'>([
+  ['edit', 'edit'],
+  ['edit_file', 'edit'],
+  ['apply_patch', 'edit'],
+  ['patch', 'edit'],
+  ['multi_edit', 'edit'],
+  ['write', 'write'],
+  ['write_file', 'write'],
+  ['create_file', 'write'],
+]);
+
 function extractDiffFromToolArgs(
   toolName: string,
   rawArgs: unknown,
 ): ToolBadgeEntry['diff'] | undefined {
-  if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) return undefined;
+  const kind = DIFF_TOOL_KINDS.get(toolName.trim().toLowerCase());
+  if (!kind || !rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) return undefined;
   const a = rawArgs as Record<string, unknown>;
   const path = pickStringField(a, ['file_path', 'path']);
   if (!path) return undefined;
   const newText = pickStringField(a, ['new_string', 'newText', 'content', 'replacement']);
   if (newText === undefined) return undefined;
   const oldMatch = pickStringField(a, ['old_string', 'oldText', 'target']);
-  const oldText = oldMatch !== undefined ? oldMatch : toolName.toLowerCase().includes('write') ? null : '';
-  return { path, oldText, newText };
+  if (kind === 'edit' && oldMatch === undefined) return undefined;
+  return { path, oldText: kind === 'write' ? null : (oldMatch ?? ''), newText };
 }
 
 export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void {
@@ -210,6 +222,35 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         process.stdout.write(chunk);
       } catch {
         /* ignore broken pipe during shutdown */
+      }
+    }
+  };
+
+  const setTtyInteractiveState = (active: boolean) => {
+    if (!interactive) return;
+    if (active) {
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+        try {
+          process.stdin.setRawMode(true);
+        } catch {
+          /* non-raw TTY fallback */
+        }
+      }
+      process.stdin.resume();
+      writeOut('\x1b[?2004h');
+    } else {
+      try {
+        process.stdout.write('\x1b[?2004l');
+      } catch {
+        /* ignore */
+      }
+      process.stdin.pause();
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+        try {
+          process.stdin.setRawMode(false);
+        } catch {
+          /* ignore */
+        }
       }
     }
   };
@@ -361,7 +402,13 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     isAttached: () => attached,
     setAttached: (nextAttached: boolean) => {
       attached = nextAttached;
-      if (attached && interactive) {
+      if (!nextAttached) {
+        lineBuffer = '';
+        setTtyInteractiveState(false);
+        return;
+      }
+      setTtyInteractiveState(true);
+      if (interactive) {
         writeOut(`\n${renderHeader(buildStatus(), cols())}\n`);
         renderPromptLine();
       }
@@ -372,8 +419,10 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     },
     detach: () => {
       attached = false;
+      lineBuffer = '';
       interactions.handleCtrlC();
       interactions.clearSessionGrants();
+      setTtyInteractiveState(false);
       const tmuxSock = process.env.NS_DSH_TMUX_SOCKET;
       if (tmuxSock) {
         try {
@@ -895,15 +944,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   let onResize: (() => void) | undefined;
   if (interactive) {
     parser = new BracketedPasteParser();
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-      try {
-        process.stdin.setRawMode(true);
-      } catch {
-        /* non-raw TTY fallback */
-      }
-    }
-    process.stdin.resume();
-    writeOut('\x1b[?2004h');
+    setTtyInteractiveState(attached);
     const initialResume = rawConfig.resume || process.env.NS_DSH_RESUME || undefined;
     void ensureRootAgent(initialResume).then(() => {
       if (attached) {
@@ -920,11 +961,13 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     process.stdout?.on('resize', onResize);
 
     onData = (chunk: Buffer) => {
+      if (!attached) return;
       for (const tok of parser!.feed(chunk)) {
         if (tok.type === 'ctrl_c') {
           if (!interactions.handleCtrlC()) {
             const a = resolveRootAgent();
             if (a && a.status === 'running') {
+              activeAttemptIds.clear();
               a.cancel({ kind: 'user' });
               writeOut('\n[Turn aborted via Ctrl+C]\n');
             } else {
@@ -977,17 +1020,9 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     cleanupInteractiveTty = () => {
       if (ttyCleaned) return;
       ttyCleaned = true;
-      writeOut('\x1b[?2004l');
+      setTtyInteractiveState(false);
       if (onData) process.stdin.off('data', onData);
       if (onResize) process.stdout?.off('resize', onResize);
-      process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-        try {
-          process.stdin.setRawMode(false);
-        } catch {
-          /* ignore */
-        }
-      }
     };
   }
 

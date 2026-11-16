@@ -15,6 +15,7 @@ export declare class TerminalInteractionController {
         question: PendingQuestionPrompt | null;
     };
     hasActivePrompt(): boolean;
+    private static grantKey;
     hasSessionGrant(toolName: string, code?: string): boolean;
     clearSessionGrants(): void;
     promptApproval(req: {

@@ -29,8 +29,11 @@ export class TerminalInteractionController {
     hasActivePrompt() {
         return Boolean(this.activeApproval || this.activeQuestion);
     }
+    static grantKey(toolName) {
+        return toolName.trim().toLowerCase();
+    }
     hasSessionGrant(toolName, code) {
-        return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(toolName);
+        return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(TerminalInteractionController.grantKey(toolName));
     }
     clearSessionGrants() {
         this.sessionAllowedTools.clear();
@@ -38,7 +41,7 @@ export class TerminalInteractionController {
     async promptApproval(req) {
         if (req.signal?.aborted)
             return 'cancelled';
-        if (isSessionGrantEligible(req.toolName, req.code) && this.sessionAllowedTools.has(req.toolName)) {
+        if (this.hasSessionGrant(req.toolName, req.code)) {
             return 'allowed-once';
         }
         if (this.activeApproval) {
@@ -171,7 +174,7 @@ export class TerminalInteractionController {
                     this.writeFn(`[One-off approval only for high-risk tool: ${approval.prompt.toolName}; enter [y] once or [n] deny]\n`);
                     return true;
                 }
-                this.sessionAllowedTools.add(approval.prompt.toolName);
+                this.sessionAllowedTools.add(TerminalInteractionController.grantKey(approval.prompt.toolName));
                 this.writeFn(`[Allowed for session: ${approval.prompt.toolName}]\n`);
                 approval.resolve('allowed-once');
                 return true;
