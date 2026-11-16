@@ -25,8 +25,8 @@ export class TerminalInteractionController {
     hasActivePrompt() {
         return Boolean(this.activeApproval || this.activeQuestion);
     }
-    hasSessionGrant(toolName) {
-        return this.sessionAllowedTools.has(toolName);
+    hasSessionGrant(toolName, code) {
+        return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(toolName);
     }
     clearSessionGrants() {
         this.sessionAllowedTools.clear();
@@ -83,7 +83,7 @@ export class TerminalInteractionController {
     }
     async promptQuestion(req) {
         if (!Array.isArray(req.questions) || req.questions.length === 0) {
-            return { cancelled: false, answers: [] };
+            return { cancelled: true, answers: [] };
         }
         if (req.signal?.aborted)
             return { cancelled: true, answers: [] };

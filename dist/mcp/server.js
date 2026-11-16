@@ -114,7 +114,16 @@ export async function startMcpServer() {
                 try {
                     const params = (req.params ?? {});
                     const toolName = params.name ?? '';
-                    const a = params.arguments ?? {};
+                    const rawArgs = params.arguments;
+                    if (rawArgs !== undefined && (typeof rawArgs !== 'object' || rawArgs === null || Array.isArray(rawArgs))) {
+                        write({
+                            jsonrpc: '2.0',
+                            id: req.id,
+                            error: { code: -32602, message: 'Invalid params: arguments must be an object' },
+                        });
+                        continue;
+                    }
+                    const a = rawArgs ?? {};
                     let out;
                     if (toolName === 'tui_format_status') {
                         if (typeof a.model !== 'string' || !a.model.trim()) {
@@ -129,11 +138,11 @@ export async function startMcpServer() {
                             branch: typeof a.branch === 'string' ? a.branch : undefined,
                             planMode: typeof a.planMode === 'boolean' ? a.planMode : undefined,
                             switchyardTier: typeof a.switchyardTier === 'string' ? a.switchyardTier : undefined,
-                            contextPercent: typeof a.contextPercent === 'number' ? a.contextPercent : undefined,
+                            contextPercent: Number.isFinite(a.contextPercent) ? Number(a.contextPercent) : undefined,
                             forewispStrategy: typeof a.forewispStrategy === 'string' ? a.forewispStrategy : undefined,
-                            forewispOffers: typeof a.forewispOffers === 'number' ? a.forewispOffers : undefined,
+                            forewispOffers: Number.isFinite(a.forewispOffers) ? Math.trunc(Number(a.forewispOffers)) : undefined,
                             cugaMode: typeof a.cugaMode === 'string' ? a.cugaMode : undefined,
-                            tokensUsed: typeof a.tokensUsed === 'number' ? a.tokensUsed : undefined,
+                            tokensUsed: Number.isFinite(a.tokensUsed) ? Math.trunc(Number(a.tokensUsed)) : undefined,
                             running: typeof a.running === 'boolean' ? a.running : undefined,
                         };
                         out = {
@@ -143,6 +152,12 @@ export async function startMcpServer() {
                     else if (toolName === 'tui_format_diff') {
                         if (typeof a.path !== 'string' || typeof a.newText !== 'string') {
                             throw new Error('path and newText strings are required');
+                        }
+                        if (a.newText.length > 262_144 || (typeof a.oldText === 'string' && a.oldText.length > 262_144)) {
+                            throw new Error('Diff text exceeds 256KB display cap');
+                        }
+                        if (a.oldText !== undefined && a.oldText !== null && typeof a.oldText !== 'string') {
+                            throw new Error('oldText must be a string or null');
                         }
                         const maxLines = Number.isFinite(a.maxLines) ? Math.max(4, Math.min(500, Math.trunc(Number(a.maxLines)))) : 24;
                         out = {

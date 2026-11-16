@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type {
   PendingApprovalPrompt,
   PendingQuestionPrompt,
@@ -197,12 +198,13 @@ export interface ParsedKeyToken {
  * multi-byte UTF-8 Unicode (e.g. "Zürich 日本語"), and control keys without splitting paste chunks.
  */
 export class BracketedPasteParser {
+  private readonly decoder = new StringDecoder('utf8');
   private buf = '';
   private inPaste = false;
   private pasteBuf = '';
 
   feed(chunk: Buffer | string): ParsedKeyToken[] {
-    const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    const str = typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
     this.buf += str;
     const tokens: ParsedKeyToken[] = [];
 

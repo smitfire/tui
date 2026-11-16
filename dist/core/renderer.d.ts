@@ -23,6 +23,7 @@ export interface ParsedKeyToken {
  * multi-byte UTF-8 Unicode (e.g. "Zürich 日本語"), and control keys without splitting paste chunks.
  */
 export declare class BracketedPasteParser {
+    private readonly decoder;
     private buf;
     private inPaste;
     private pasteBuf;

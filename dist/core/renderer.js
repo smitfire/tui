@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -172,11 +173,12 @@ export function renderFooter(status, columns = 100, noColor) {
  * multi-byte UTF-8 Unicode (e.g. "Zürich 日本語"), and control keys without splitting paste chunks.
  */
 export class BracketedPasteParser {
+    decoder = new StringDecoder('utf8');
     buf = '';
     inPaste = false;
     pasteBuf = '';
     feed(chunk) {
-        const str = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+        const str = typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
         this.buf += str;
         const tokens = [];
         while (this.buf.length > 0) {

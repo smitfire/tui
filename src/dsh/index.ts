@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Context } from '@deepseek-ai/cordis';
@@ -109,28 +109,44 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 32_768): Promise<
   });
 }
 
-const GIT_BRANCH_CACHE = new Map<string, { value?: string; at: number }>();
+const GIT_BRANCH_CACHE = new Map<string, { value?: string; at: number; pending: boolean }>();
+
+function refreshGitBranchAsync(cwd: string): void {
+  const existing = GIT_BRANCH_CACHE.get(cwd);
+  if (existing?.pending) return;
+  if (GIT_BRANCH_CACHE.size >= 16) {
+    const oldestKey = GIT_BRANCH_CACHE.keys().next().value;
+    if (oldestKey) GIT_BRANCH_CACHE.delete(oldestKey);
+  }
+  GIT_BRANCH_CACHE.set(cwd, { value: existing?.value, at: Date.now(), pending: true });
+  execFile(
+    'git',
+    ['rev-parse', '--abbrev-ref', 'HEAD'],
+    { cwd, encoding: 'utf8', timeout: 1500 },
+    (err, stdout) => {
+      const value = !err && stdout ? stdout.trim() : existing?.value;
+      GIT_BRANCH_CACHE.set(cwd, { value, at: Date.now(), pending: false });
+    },
+  );
+}
 
 function readGitBranch(cwd: string): string | undefined {
   const now = Date.now();
   const hit = GIT_BRANCH_CACHE.get(cwd);
-  if (hit && now - hit.at < 3000) return hit.value;
-  let value: string | undefined;
-  try {
-    value = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd,
-      encoding: 'utf8',
-      timeout: 1500,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    value = undefined;
+  if (!hit || now - hit.at > 15_000) {
+    refreshGitBranchAsync(cwd);
   }
-  GIT_BRANCH_CACHE.set(cwd, { value, at: now });
-  return value;
+  return hit?.value;
 }
 
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'max']);
+
+function pickStringField(obj: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const k of keys) {
+    if (typeof obj[k] === 'string') return obj[k];
+  }
+  return undefined;
+}
 
 function extractDiffFromToolArgs(
   toolName: string,
@@ -138,29 +154,12 @@ function extractDiffFromToolArgs(
 ): ToolBadgeEntry['diff'] | undefined {
   if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) return undefined;
   const a = rawArgs as Record<string, unknown>;
-  const path = typeof a.file_path === 'string' ? a.file_path : typeof a.path === 'string' ? a.path : undefined;
+  const path = pickStringField(a, ['file_path', 'path']);
   if (!path) return undefined;
-  const newText =
-    typeof a.new_string === 'string'
-      ? a.new_string
-      : typeof a.newText === 'string'
-        ? a.newText
-        : typeof a.content === 'string'
-          ? a.content
-          : typeof a.replacement === 'string'
-            ? a.replacement
-            : undefined;
+  const newText = pickStringField(a, ['new_string', 'newText', 'content', 'replacement']);
   if (newText === undefined) return undefined;
-  const oldText =
-    typeof a.old_string === 'string'
-      ? a.old_string
-      : typeof a.oldText === 'string'
-        ? a.oldText
-        : typeof a.target === 'string'
-          ? a.target
-          : toolName.toLowerCase().includes('write')
-            ? null
-            : '';
+  const oldMatch = pickStringField(a, ['old_string', 'oldText', 'target']);
+  const oldText = oldMatch !== undefined ? oldMatch : toolName.toLowerCase().includes('write') ? null : '';
   return { path, oldText, newText };
 }
 
@@ -754,10 +753,21 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
             options: { type: 'array', items: { type: 'string' }, description: 'Optional choice labels.' },
           },
           output: {
-            schema: { type: 'object', properties: {}, additionalProperties: true },
+            schema: {
+              type: 'object',
+              properties: {
+                answered: { type: 'boolean' },
+                reason: { type: 'string' },
+                answers: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              },
+              additionalProperties: true,
+            },
             render: (_args, val) => [{ type: 'text', text: JSON.stringify(val) }],
           },
           execute: async (args, exec): Promise<Record<string, boolean | string | Array<Record<string, string | string[]>>>> => {
+            if (typeof args.question !== 'string' || !args.question.trim()) {
+              return { answered: false, reason: 'question string is required' };
+            }
             const uq = ctx.get('userQuestions');
             if (!uq) return { answered: false, reason: 'userQuestions service absent' };
             const res = await uq.ask({
@@ -766,7 +776,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
               questions: [
                 {
                   id: 'q1',
-                  question: String(args.question),
+                  question: args.question.trim(),
                   options: Array.isArray(args.options)
                     ? args.options.map((label) => ({ label: String(label) }))
                     : undefined,
@@ -815,7 +825,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
             tuiService.setAttached(Boolean(body.attached));
             sendJson(res, 200, { ok: true, attached });
           } catch (err) {
-            const code = (err as { statusCode?: number }).statusCode ?? 400;
+            const rawCode = (err as { statusCode?: number }).statusCode;
+            const code = typeof rawCode === 'number' && Number.isInteger(rawCode) && rawCode >= 400 && rawCode <= 599 ? rawCode : 400;
             sendJson(res, code, { error: err instanceof Error ? err.message : String(err) });
           }
         },
@@ -833,7 +844,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
             const out = await tuiService.resume(sid);
             sendJson(res, 200, { ok: true, sessionId: out.sessionId });
           } catch (err) {
-            const code = (err as { statusCode?: number }).statusCode ?? 400;
+            const rawCode = (err as { statusCode?: number }).statusCode;
+            const code = typeof rawCode === 'number' && Number.isInteger(rawCode) && rawCode >= 400 && rawCode <= 599 ? rawCode : 400;
             sendJson(res, code, { error: err instanceof Error ? err.message : String(err) });
           }
         },

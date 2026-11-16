@@ -52,8 +52,8 @@ export class TerminalInteractionController {
     return Boolean(this.activeApproval || this.activeQuestion);
   }
 
-  hasSessionGrant(toolName: string): boolean {
-    return this.sessionAllowedTools.has(toolName);
+  hasSessionGrant(toolName: string, code?: string): boolean {
+    return isSessionGrantEligible(toolName, code) && this.sessionAllowedTools.has(toolName);
   }
 
   clearSessionGrants(): void {
@@ -121,7 +121,7 @@ export class TerminalInteractionController {
     signal?: AbortSignal;
   }): Promise<{ cancelled: boolean; answers: QuestionAnswerItem[] }> {
     if (!Array.isArray(req.questions) || req.questions.length === 0) {
-      return { cancelled: false, answers: [] };
+      return { cancelled: true, answers: [] };
     }
     if (req.signal?.aborted) return { cancelled: true, answers: [] };
     if (this.activeQuestion) {
