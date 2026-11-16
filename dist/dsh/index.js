@@ -127,15 +127,19 @@ function pickStringField(obj, keys) {
     }
     return undefined;
 }
+// Canonical DSH & MCP file mutation tool names eligible for diff preview cards.
 const DIFF_TOOL_KINDS = new Map([
     ['edit', 'edit'],
     ['edit_file', 'edit'],
     ['apply_patch', 'edit'],
     ['patch', 'edit'],
     ['multi_edit', 'edit'],
+    ['str_replace', 'edit'],
+    ['replace_in_file', 'edit'],
     ['write', 'write'],
     ['write_file', 'write'],
     ['create_file', 'write'],
+    ['fs_write', 'write'],
 ]);
 function extractDiffFromToolArgs(toolName, rawArgs) {
     const kind = DIFF_TOOL_KINDS.get(toolName.trim().toLowerCase());
@@ -185,34 +189,20 @@ export function apply(ctx, rawConfig = {}) {
     const setTtyInteractiveState = (active) => {
         if (!interactive)
             return;
-        if (active) {
-            if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-                try {
-                    process.stdin.setRawMode(true);
-                }
-                catch {
-                    /* non-raw TTY fallback */
-                }
-            }
-            process.stdin.resume();
-            writeOut('\x1b[?2004h');
-        }
-        else {
+        process.stdin.resume();
+        if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
             try {
-                process.stdout.write('\x1b[?2004l');
+                process.stdin.setRawMode(active);
             }
             catch {
-                /* ignore */
+                /* non-raw TTY fallback */
             }
-            process.stdin.pause();
-            if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-                try {
-                    process.stdin.setRawMode(false);
-                }
-                catch {
-                    /* ignore */
-                }
-            }
+        }
+        try {
+            process.stdout.write(active ? '\x1b[?2004h' : '\x1b[?2004l');
+        }
+        catch {
+            /* ignore */
         }
     };
     let cleanupInteractiveTty = () => { };
@@ -935,6 +925,7 @@ export function apply(ctx, rawConfig = {}) {
                 return;
             ttyCleaned = true;
             setTtyInteractiveState(false);
+            process.stdin.pause();
             if (onData)
                 process.stdin.off('data', onData);
             if (onResize)
