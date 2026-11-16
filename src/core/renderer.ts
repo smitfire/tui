@@ -139,7 +139,8 @@ export function renderApprovalBox(prompt: PendingApprovalPrompt, columns = 100, 
   const line1 = paint(`? Approval Required${code}: ${clampColumns(prompt.toolName, width - 26)}`, YELLOW + BOLD, noColor);
   const line2 = prompt.reason ? `  ${clampColumns(prompt.reason, width - 4)}` : '';
   const line3 = prompt.commandPreview ? paint(`  $ ${clampColumns(prompt.commandPreview, width - 6)}`, CYAN, noColor) : '';
-  const choices = paint('  [y] Allow once   [a] Allow tool for session   [n / Esc / Ctrl+C] Deny', BOLD, noColor);
+  const allowChoice = prompt.allowSessionGrant !== false ? '  [y] Allow once   [a] Allow tool for session   [n / Esc / Ctrl+C] Deny' : '  [y] Allow once   [n / Esc / Ctrl+C] Deny';
+  const choices = paint(allowChoice, BOLD, noColor);
   return [line1, line2, line3, choices].filter(Boolean).join('\n');
 }
 

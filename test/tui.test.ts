@@ -258,6 +258,7 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
       method: opts.method,
       headers: opts.headers ?? { host: '127.0.0.1:7430' },
       pause: () => {},
+      resume: () => {},
     });
     let status = 200;
     let raw = '';
@@ -313,6 +314,12 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
     body: '{bad json',
   });
   assert.equal(attachBadJson.status, 400);
+
+  const attachTooBig = await callHttp('/ns-tui/api/attach', {
+    method: 'POST',
+    body: 'x'.repeat(40_000),
+  });
+  assert.equal(attachTooBig.status, 413);
 
   const resumeMissing = await callHttp('/ns-tui/api/resume', {
     method: 'POST',

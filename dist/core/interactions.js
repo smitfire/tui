@@ -48,6 +48,7 @@ export class TerminalInteractionController {
             code: req.code,
             reason: req.reason,
             commandPreview: req.commandPreview,
+            allowSessionGrant: isSessionGrantEligible(req.toolName, req.code),
         };
         return new Promise((resolve) => {
             let settled = false;

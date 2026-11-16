@@ -42,6 +42,7 @@ export interface PendingApprovalPrompt {
     code?: string;
     reason?: string;
     commandPreview?: string;
+    allowSessionGrant?: boolean;
 }
 export interface PendingQuestionOption {
     label: string;

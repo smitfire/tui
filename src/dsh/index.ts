@@ -69,6 +69,7 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown): void 
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    ...(statusCode === 413 ? { connection: 'close' } : {}),
   });
   res.end(JSON.stringify(body));
 }
@@ -84,13 +85,14 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 32_768): Promise<
       rejectBody(err);
     };
     req.on('data', (c: Buffer) => {
+      if (settled) return;
       total += c.length;
       if (total > limitBytes) {
+        req.resume();
         fail(Object.assign(new Error('request body exceeds 32KB limit'), { statusCode: 413 }));
-        req.destroy();
         return;
       }
-      if (!settled) chunks.push(c);
+      chunks.push(c);
     });
     req.on('end', () => {
       if (settled) return;
@@ -407,96 +409,115 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     }),
   );
 
-  ctx.systemPrompt.context({
-    name: 'ns-tui:mode',
-    order: 186,
-    interpolate: false,
-    text: () =>
-      planMode
-        ? '<tui-plan-mode>Operator has enabled read-only PLAN mode. Inspect code and propose Kanban tasks instead of mutating workspace files.</tui-plan-mode>'
-        : '',
-  });
+  disposers.push(
+    ctx.systemPrompt.context({
+      name: 'ns-tui:mode',
+      order: 186,
+      interpolate: false,
+      text: () =>
+        planMode
+          ? '<tui-plan-mode>Operator has enabled read-only PLAN mode. Inspect code and propose Kanban tasks instead of mutating workspace files.</tui-plan-mode>'
+          : '',
+    }),
+  );
 
   // Priority HITL Approval handler: claim inline when attached, else delegate to WebUI via next().
-  ctx.on(
-    'approval/request',
-    async (req: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> => {
-      if (!attached) return next();
-      const outcome = await interactions.promptApproval({
-        toolName: req.toolName,
-        reason: req.displayReason?.en ?? req.reason,
-        signal: req.signal,
-      });
-      return outcome;
-    },
-    { prepend: true },
+  disposers.push(
+    ctx.on(
+      'approval/request',
+      async (req: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> => {
+        if (!attached) return next();
+        try {
+          return await interactions.promptApproval({
+            toolName: req.toolName,
+            reason: req.displayReason?.en ?? req.reason,
+            signal: req.signal,
+          });
+        } catch (err) {
+          log.warn(`Inline approval error, falling back to next(): ${err instanceof Error ? err.message : String(err)}`);
+          return next();
+        }
+      },
+      { prepend: true },
+    ),
   );
 
   // Priority HITL Question handler: claim inline when attached, else delegate to WebUI via next().
-  ctx.on(
-    'user-questions/request',
-    async (req: AskUserQuestionRequestEvent, next: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer> => {
-      if (!attached) return next();
-      const res = await interactions.promptQuestion({
-        questions: req.questions.map((q: AskUserQuestionItem) => ({
-          id: q.id,
-          question: q.question,
-          detail: q.detail,
-          header: q.header,
-          options: q.options,
-          multiSelect: q.multiSelect,
-        })),
-        signal: req.signal,
-      });
-      if (res.cancelled) {
-        return { answers: [] };
-      }
-      return { answers: res.answers };
-    },
-    { prepend: true },
+  disposers.push(
+    ctx.on(
+      'user-questions/request',
+      async (req: AskUserQuestionRequestEvent, next: () => Promise<AskUserQuestionAnswer>): Promise<AskUserQuestionAnswer> => {
+        if (!attached) return next();
+        try {
+          const res = await interactions.promptQuestion({
+            questions: req.questions.map((q: AskUserQuestionItem) => ({
+              id: q.id,
+              question: q.question,
+              detail: q.detail,
+              header: q.header,
+              options: q.options,
+              multiSelect: q.multiSelect,
+            })),
+            signal: req.signal,
+          });
+          if (res.cancelled) {
+            return { answers: [] };
+          }
+          return { answers: res.answers };
+        } catch (err) {
+          log.warn(`Inline user-question error, falling back to next(): ${err instanceof Error ? err.message : String(err)}`);
+          return next();
+        }
+      },
+      { prepend: true },
+    ),
   );
 
   // Live streaming output, tool badges, PTC savings, and usage telemetry
   const activeAttemptIds = new Set<string>();
-  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
-    const root = resolveRootAgent();
-    if (root && agent.id !== root.id) return;
-    const attemptId = String(frame.attemptId);
-    if (frame.type === 'start') {
-      activeAttemptIds.add(attemptId);
-      writeOut('\n');
-    } else if (frame.type === 'chunk') {
-      if (frame.chunk.type === 'text-delta' && frame.chunk.text) {
-        writeOut(frame.chunk.text);
-      } else if (frame.chunk.type === 'usage') {
-        const u = frame.chunk.usage;
-        totalTokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+  disposers.push(
+    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+      const root = resolveRootAgent();
+      if (root && agent.id !== root.id) return;
+      const attemptId = String(frame.attemptId);
+      if (frame.type === 'start') {
+        activeAttemptIds.add(attemptId);
+        writeOut('\n');
+      } else if (frame.type === 'chunk') {
+        if (frame.chunk.type === 'text-delta' && frame.chunk.text) {
+          writeOut(frame.chunk.text);
+        } else if (frame.chunk.type === 'usage') {
+          const u = frame.chunk.usage;
+          totalTokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+        }
+      } else if (frame.type === 'end') {
+        activeAttemptIds.delete(attemptId);
+        if (activeAttemptIds.size === 0) renderPromptLine();
       }
-    } else if (frame.type === 'end') {
-      activeAttemptIds.delete(attemptId);
-      if (activeAttemptIds.size === 0) renderPromptLine();
-    }
-  });
+    }),
+  );
 
-  ctx.on('tools/result', (exec, result) => {
-    const isErr = result?.isError === true;
-    const textPreview = (Array.isArray(result?.content) ? result.content : [])
-      .filter((b): b is { type: 'text'; text: string } => b?.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join(' ')
-      .slice(0, 120);
-    if (textPreview.includes('CUGA_')) cugaBlocks += 1;
-    const diff = extractDiffFromToolArgs(exec.name, (exec as { arguments?: unknown }).arguments);
-    const badge: ToolBadgeEntry = {
-      toolName: exec.name,
-      summary: textPreview || (isErr ? 'error' : 'ok'),
-      ok: !isErr,
-      ...(diff ? { diff } : {}),
-    };
-    recentBadges.push(badge);
-    if (recentBadges.length > 30) recentBadges.shift();
-    writeOut(`\n${renderToolBadge(badge, expandBadges, cols())}\n`);
-  });
+  disposers.push(
+    ctx.on('tools/result', (exec, result) => {
+      const isErr = result?.isError === true;
+      const textPreview = (Array.isArray(result?.content) ? result.content : [])
+        .filter((b): b is { type: 'text'; text: string } => b?.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join(' ')
+        .slice(0, 120);
+      if (textPreview.includes('CUGA_')) cugaBlocks += 1;
+      const diff = extractDiffFromToolArgs(exec.name, (exec as { arguments?: unknown }).arguments);
+      const badge: ToolBadgeEntry = {
+        toolName: exec.name,
+        summary: textPreview || (isErr ? 'error' : 'ok'),
+        ok: !isErr,
+        ...(diff ? { diff } : {}),
+      };
+      recentBadges.push(badge);
+      if (recentBadges.length > 30) recentBadges.shift();
+      writeOut(`\n${renderToolBadge(badge, expandBadges, cols())}\n`);
+    }),
+  );
 
   // Safe slash command registration (never throws on duplicate across plugins)
   const regCmd = (

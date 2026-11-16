@@ -33,6 +33,7 @@ function sendJson(res, statusCode, body) {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
+        ...(statusCode === 413 ? { connection: 'close' } : {}),
     });
     res.end(JSON.stringify(body));
 }
@@ -48,14 +49,15 @@ async function readJsonBody(req, limitBytes = 32_768) {
             rejectBody(err);
         };
         req.on('data', (c) => {
+            if (settled)
+                return;
             total += c.length;
             if (total > limitBytes) {
+                req.resume();
                 fail(Object.assign(new Error('request body exceeds 32KB limit'), { statusCode: 413 }));
-                req.destroy();
                 return;
             }
-            if (!settled)
-                chunks.push(c);
+            chunks.push(c);
         });
         req.on('end', () => {
             if (settled)
@@ -342,48 +344,59 @@ export function apply(ctx, rawConfig = {}) {
         }
         return undefined;
     }));
-    ctx.systemPrompt.context({
+    disposers.push(ctx.systemPrompt.context({
         name: 'ns-tui:mode',
         order: 186,
         interpolate: false,
         text: () => planMode
             ? '<tui-plan-mode>Operator has enabled read-only PLAN mode. Inspect code and propose Kanban tasks instead of mutating workspace files.</tui-plan-mode>'
             : '',
-    });
+    }));
     // Priority HITL Approval handler: claim inline when attached, else delegate to WebUI via next().
-    ctx.on('approval/request', async (req, next) => {
+    disposers.push(ctx.on('approval/request', async (req, next) => {
         if (!attached)
             return next();
-        const outcome = await interactions.promptApproval({
-            toolName: req.toolName,
-            reason: req.displayReason?.en ?? req.reason,
-            signal: req.signal,
-        });
-        return outcome;
-    }, { prepend: true });
-    // Priority HITL Question handler: claim inline when attached, else delegate to WebUI via next().
-    ctx.on('user-questions/request', async (req, next) => {
-        if (!attached)
-            return next();
-        const res = await interactions.promptQuestion({
-            questions: req.questions.map((q) => ({
-                id: q.id,
-                question: q.question,
-                detail: q.detail,
-                header: q.header,
-                options: q.options,
-                multiSelect: q.multiSelect,
-            })),
-            signal: req.signal,
-        });
-        if (res.cancelled) {
-            return { answers: [] };
+        try {
+            return await interactions.promptApproval({
+                toolName: req.toolName,
+                reason: req.displayReason?.en ?? req.reason,
+                signal: req.signal,
+            });
         }
-        return { answers: res.answers };
-    }, { prepend: true });
+        catch (err) {
+            log.warn(`Inline approval error, falling back to next(): ${err instanceof Error ? err.message : String(err)}`);
+            return next();
+        }
+    }, { prepend: true }));
+    // Priority HITL Question handler: claim inline when attached, else delegate to WebUI via next().
+    disposers.push(ctx.on('user-questions/request', async (req, next) => {
+        if (!attached)
+            return next();
+        try {
+            const res = await interactions.promptQuestion({
+                questions: req.questions.map((q) => ({
+                    id: q.id,
+                    question: q.question,
+                    detail: q.detail,
+                    header: q.header,
+                    options: q.options,
+                    multiSelect: q.multiSelect,
+                })),
+                signal: req.signal,
+            });
+            if (res.cancelled) {
+                return { answers: [] };
+            }
+            return { answers: res.answers };
+        }
+        catch (err) {
+            log.warn(`Inline user-question error, falling back to next(): ${err instanceof Error ? err.message : String(err)}`);
+            return next();
+        }
+    }, { prepend: true }));
     // Live streaming output, tool badges, PTC savings, and usage telemetry
     const activeAttemptIds = new Set();
-    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    disposers.push(ctx.on('agent/assistant-stream', ({ agent, frame }) => {
         const root = resolveRootAgent();
         if (root && agent.id !== root.id)
             return;
@@ -406,8 +419,8 @@ export function apply(ctx, rawConfig = {}) {
             if (activeAttemptIds.size === 0)
                 renderPromptLine();
         }
-    });
-    ctx.on('tools/result', (exec, result) => {
+    }));
+    disposers.push(ctx.on('tools/result', (exec, result) => {
         const isErr = result?.isError === true;
         const textPreview = (Array.isArray(result?.content) ? result.content : [])
             .filter((b) => b?.type === 'text' && typeof b.text === 'string')
@@ -427,7 +440,7 @@ export function apply(ctx, rawConfig = {}) {
         if (recentBadges.length > 30)
             recentBadges.shift();
         writeOut(`\n${renderToolBadge(badge, expandBadges, cols())}\n`);
-    });
+    }));
     // Safe slash command registration (never throws on duplicate across plugins)
     const regCmd = (cmdName, description, handler) => {
         try {
