@@ -4,6 +4,7 @@ import { type NsTuiService } from '../core/index.js';
 export declare const name = "ns-tui";
 export declare const inject: readonly ["agents", "commands", "tools", "sessions", "systemPrompt"];
 export interface PluginConfig {
+    enabled?: boolean;
     interactive?: boolean;
     resume?: string;
     appName?: string;

@@ -127,14 +127,15 @@ export async function startMcpServer(): Promise<void> {
           const a = (rawArgs as Record<string, unknown>) ?? {};
           let out: unknown;
           if (toolName === 'tui_format_status') {
-            if (typeof a.model !== 'string' || !a.model.trim()) {
+            const modelName = typeof a.model === 'string' ? a.model.trim() : '';
+            if (!modelName) {
               throw new Error('model string is required');
             }
             const cols = Number.isFinite(a.columns) ? Math.max(40, Math.min(400, Math.trunc(Number(a.columns)))) : 100;
             const snap: TuiStatusSnapshot = {
               cwd: typeof a.cwd === 'string' && a.cwd ? a.cwd : process.cwd(),
               sessionId: typeof a.sessionId === 'string' && a.sessionId ? a.sessionId : 'new',
-              model: a.model,
+              model: modelName,
               effort: typeof a.effort === 'string' ? a.effort : undefined,
               branch: typeof a.branch === 'string' ? a.branch : undefined,
               planMode: typeof a.planMode === 'boolean' ? a.planMode : undefined,
@@ -196,6 +197,8 @@ export async function startMcpServer(): Promise<void> {
             },
           });
         }
+      } else if (req.method === 'ping') {
+        write({ jsonrpc: '2.0', id: req.id, result: {} });
       } else {
         write({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: `Method not found: ${req.method}` } });
       }

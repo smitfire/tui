@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import z from '@deepseek-ai/schemastery';
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -9,6 +9,7 @@ import { BracketedPasteParser, TerminalInteractionController, renderDiffBlock, r
 export const name = 'ns-tui';
 export const inject = ['agents', 'commands', 'tools', 'sessions', 'systemPrompt'];
 export const Config = z.object({
+    enabled: z.boolean(),
     interactive: z.boolean(),
     resume: z.string(),
     appName: z.string().default('ns-dsh'),
@@ -16,13 +17,33 @@ export const Config = z.object({
 });
 const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i;
 const LOOPBACK_HOST_RE = /^(?:127\.\d+\.\d+\.\d+|localhost|\[::1\]|::1)(?::\d+)?$/i;
-function isLoopbackRequest(req) {
+const LOOPBACK_REMOTE_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+function isLoopbackRequest(req, requireControlToken = false) {
+    const remoteAddr = req.socket?.remoteAddress;
+    if (typeof remoteAddr === 'string' && remoteAddr.length > 0 && !LOOPBACK_REMOTE_ADDRS.has(remoteAddr)) {
+        return false;
+    }
     const host = String(req.headers.host ?? '');
     if (!host || !LOOPBACK_HOST_RE.test(host))
         return false;
+    const secFetchSite = req.headers['sec-fetch-site'];
+    if (typeof secFetchSite === 'string' && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+        return false;
+    }
     const origin = req.headers.origin;
     if (typeof origin === 'string' && origin.length > 0 && !LOOPBACK_ORIGIN_RE.test(origin)) {
         return false;
+    }
+    if (requireControlToken) {
+        const expected = process.env.NS_DSH_TUI_TOKEN?.trim();
+        if (expected) {
+            const providedHeader = req.headers['x-ns-tui-token'];
+            const provided = typeof providedHeader === 'string' ? providedHeader.trim() : '';
+            const a = Buffer.from(provided, 'utf8');
+            const b = Buffer.from(expected, 'utf8');
+            if (a.length !== b.length || !timingSafeEqual(a, b))
+                return false;
+        }
     }
     return true;
 }
@@ -122,6 +143,9 @@ function extractDiffFromToolArgs(toolName, rawArgs) {
     return { path, oldText, newText };
 }
 export function apply(ctx, rawConfig = {}) {
+    const enabled = rawConfig.enabled ?? (rawConfig.interactive !== undefined || process.env.NS_DSH_TUI === '1');
+    if (!enabled)
+        return;
     const interactive = rawConfig.interactive ?? process.env.NS_DSH_TUI === '1';
     const appName = rawConfig.appName ?? 'ns-dsh';
     const version = rawConfig.version ?? '0.1.0';
@@ -445,8 +469,8 @@ export function apply(ctx, rawConfig = {}) {
                 handler: async (inv) => handler({ agent: inv.agent, rawInput: inv.rawInput }),
             }));
         }
-        catch {
-            /* another plugin may already register this command name */
+        catch (err) {
+            log.warn(`Skipped registering /${cmdName}: ${err instanceof Error ? err.message : String(err)}`);
         }
     };
     regCmd('help', 'List available ns-dsh slash commands', () => ({
@@ -496,7 +520,7 @@ export function apply(ctx, rawConfig = {}) {
         return {
             kind: 'success',
             text: cards
-                .map((c) => `${c.id} | ${c.column} | ${c.owner} | ${c.title}${c.blockedBy.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : ''}`)
+                .map((c) => `${c.id} | ${c.column} | ${c.owner} | ${c.title}${c.blockedBy?.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : ''}`)
                 .join('\n'),
         };
     };
@@ -513,7 +537,7 @@ export function apply(ctx, rawConfig = {}) {
             const card = nsBoard.getCard(cardId);
             if (!card)
                 return { kind: 'error', text: `Card not found: ${cardId}` };
-            const col = op === 'pickup' || op === 'resume-task' ? 'ready' : 'blocked';
+            const col = op === 'cancel' ? 'done' : op === 'pause' ? 'blocked' : 'ready';
             const out = nsBoard.moveCard({
                 cardId,
                 toColumn: col,
@@ -714,8 +738,8 @@ export function apply(ctx, rawConfig = {}) {
                 handler: async (req, res) => {
                     if (req.method !== 'POST')
                         return sendJson(res, 405, { error: 'method not allowed' });
-                    if (!isLoopbackRequest(req))
-                        return sendJson(res, 403, { error: 'loopback required' });
+                    if (!isLoopbackRequest(req, true))
+                        return sendJson(res, 403, { error: 'loopback & valid control token required' });
                     try {
                         const body = await readJsonBody(req);
                         tuiService.setAttached(Boolean(body.attached));
@@ -734,8 +758,8 @@ export function apply(ctx, rawConfig = {}) {
                 handler: async (req, res) => {
                     if (req.method !== 'POST')
                         return sendJson(res, 405, { error: 'method not allowed' });
-                    if (!isLoopbackRequest(req))
-                        return sendJson(res, 403, { error: 'loopback required' });
+                    if (!isLoopbackRequest(req, true))
+                        return sendJson(res, 403, { error: 'loopback & valid control token required' });
                     try {
                         const body = await readJsonBody(req);
                         const sid = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';

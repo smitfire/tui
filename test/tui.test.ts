@@ -250,13 +250,14 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
   // Helper to invoke registered mock HTTP route handler
   const callHttp = async (
     path: string,
-    opts: { method: string; headers?: Record<string, string>; body?: string },
+    opts: { method: string; headers?: Record<string, string>; body?: string; remoteAddress?: string },
   ): Promise<{ status: number; json: Record<string, unknown> }> => {
     const handler = routes.get(path);
     assert.ok(handler, `missing route ${path}`);
     const req = Object.assign(new EventEmitter(), {
       method: opts.method,
       headers: opts.headers ?? { host: '127.0.0.1:7430' },
+      socket: { remoteAddress: opts.remoteAddress ?? '127.0.0.1' },
       pause: () => {},
       resume: () => {},
     });
@@ -308,6 +309,31 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
     headers: { host: 'evil.example' },
   });
   assert.equal(stHostErr.status, 403);
+
+  const stRemoteErr = await callHttp('/ns-tui/api/status', {
+    method: 'GET',
+    remoteAddress: '10.0.0.99',
+  });
+  assert.equal(stRemoteErr.status, 403);
+
+  const prevTok = process.env.NS_DSH_TUI_TOKEN;
+  process.env.NS_DSH_TUI_TOKEN = 'test-secret-token';
+  try {
+    const missingTok = await callHttp('/ns-tui/api/attach', {
+      method: 'POST',
+      body: JSON.stringify({ attached: true }),
+    });
+    assert.equal(missingTok.status, 403);
+    const validTok = await callHttp('/ns-tui/api/attach', {
+      method: 'POST',
+      headers: { host: '127.0.0.1:7430', 'x-ns-tui-token': 'test-secret-token' },
+      body: JSON.stringify({ attached: true }),
+    });
+    assert.equal(validTok.status, 200);
+  } finally {
+    if (prevTok === undefined) delete process.env.NS_DSH_TUI_TOKEN;
+    else process.env.NS_DSH_TUI_TOKEN = prevTok;
+  }
 
   const attachBadJson = await callHttp('/ns-tui/api/attach', {
     method: 'POST',

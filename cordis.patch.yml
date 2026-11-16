@@ -1,3 +1,5 @@
 - insert:
     - id: ns-tui
       name: '@smitfire/tui'
+      config:
+        appName: ns-dsh
