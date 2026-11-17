@@ -127,6 +127,19 @@ test('TerminalInteractionController handles Ctrl+C reject, [y]/[a] grants, and m
     { id: 'q1', selected: ['OptionB'] },
     { id: 'q2', selected: [], custom: 'Ship with soak' },
   ]);
+
+  // 4. Overwriting active promptApproval or promptQuestion resolves prior prompt cleanly
+  const a1 = ctrl.promptApproval({ toolName: 'bash', reason: 'First' });
+  const a2 = ctrl.promptApproval({ toolName: 'bash', reason: 'Second' });
+  assert.equal(await a1, 'rejected');
+  assert.equal(ctrl.handleInputLine('y'), true);
+  assert.equal(await a2, 'allowed-once');
+
+  const qFirst = ctrl.promptQuestion({ questions: [{ id: 'qo1', question: 'First?' }] });
+  const qSecond = ctrl.promptQuestion({ questions: [{ id: 'qo2', question: 'Second?' }] });
+  assert.deepEqual(await qFirst, { cancelled: true, answers: [] });
+  assert.equal(ctrl.handleCtrlC(), true);
+  assert.equal((await qSecond).cancelled, true);
 });
 
 test('DSH Cordis plugin routes approval/user-questions inline when attached and falls through to WebUI on detach', async () => {
