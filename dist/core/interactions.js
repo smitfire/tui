@@ -45,9 +45,9 @@ export class TerminalInteractionController {
             return 'allowed-once';
         }
         if (this.activeApproval) {
-            this.activeApproval.cleanup();
-            this.activeApproval.resolve('rejected');
+            const prev = this.activeApproval;
             this.activeApproval = null;
+            prev.resolve('rejected');
         }
         const prompt = {
             id: randomUUID(),
@@ -95,9 +95,9 @@ export class TerminalInteractionController {
         if (req.signal?.aborted)
             return { cancelled: true, answers: [] };
         if (this.activeQuestion) {
-            this.activeQuestion.cleanup();
-            this.activeQuestion.resolve({ cancelled: true, answers: [] });
+            const prev = this.activeQuestion;
             this.activeQuestion = null;
+            prev.resolve({ cancelled: true, answers: [] });
         }
         const prompt = {
             id: randomUUID(),
