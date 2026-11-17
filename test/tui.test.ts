@@ -459,7 +459,10 @@ test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly o
   });
 
   try {
-    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'persisted-sess-99' }), 'utf8');
+    // 1. Persisted session from a DIFFERENT cwd is NOT auto-resumed
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'other-repo-sess', cwd: '/tmp/unrelated-repo-xyz' }), 'utf8');
+    // 2. Persisted session matching process.cwd() IS auto-resumed
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'persisted-sess-99', cwd: process.cwd() }), 'utf8');
     const ctx1 = new Context();
     await ctx1.plugin(SystemPrompt);
     await ctx1.plugin(ToolsService);
@@ -505,8 +508,8 @@ test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly o
       await f1.dispose();
     }
 
-    // Corrupt/missing persisted session falls back cleanly to create() without crashing
-    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'missing-stale-sess' }), 'utf8');
+    // Corrupt/missing persisted session for current cwd falls back cleanly to create() without crashing
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'missing-stale-sess', cwd: process.cwd() }), 'utf8');
     const ctx2 = new Context();
     await ctx2.plugin(SystemPrompt);
     await ctx2.plugin(ToolsService);

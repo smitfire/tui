@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -17,6 +17,8 @@ export const Config = z.object({
     appName: z.string().default('ns-dsh'),
     version: z.string().default('0.1.0'),
 });
+const VALID_SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+let lastPersistedSessionKey;
 function readPersistedLastSessionId() {
     const stateDir = process.env.NS_DSH_STATE_DIR?.trim();
     if (!stateDir || process.env.NS_DSH_NEW_SESSION === '1')
@@ -26,22 +28,33 @@ function readPersistedLastSessionId() {
         if (!existsSync(file))
             return undefined;
         const parsed = JSON.parse(readFileSync(file, 'utf8'));
-        return typeof parsed.sessionId === 'string' && parsed.sessionId.trim() ? parsed.sessionId.trim() : undefined;
+        if (typeof parsed.cwd !== 'string' || resolve(parsed.cwd) !== resolve(process.cwd())) {
+            return undefined;
+        }
+        const sid = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : '';
+        return VALID_SESSION_ID_RE.test(sid) ? sid : undefined;
     }
     catch {
         return undefined;
     }
 }
 function writePersistedLastSessionId(sessionId) {
+    if (process.env.NS_DSH_NEW_SESSION === '1')
+        return;
     const stateDir = process.env.NS_DSH_STATE_DIR?.trim();
-    if (!stateDir || !sessionId)
+    if (!stateDir || !VALID_SESSION_ID_RE.test(sessionId))
+        return;
+    const cwd = resolve(process.cwd());
+    const cacheKey = `${stateDir}::${cwd}::${sessionId}`;
+    if (cacheKey === lastPersistedSessionKey)
         return;
     try {
         mkdirSync(stateDir, { recursive: true, mode: 0o700 });
         const target = join(stateDir, 'last-session.json');
         const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify({ sessionId, cwd: process.cwd(), updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+        writeFileSync(tmp, `${JSON.stringify({ sessionId, cwd, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
         renameSync(tmp, target);
+        lastPersistedSessionKey = cacheKey;
     }
     catch {
         /* best-effort persistence */
@@ -317,7 +330,9 @@ export function apply(ctx, rawConfig = {}) {
                 catch (err) {
                     if (resumeId)
                         throw err;
-                    log.warn(`Auto-resume for ${candidateResume} fell back to fresh session: ${err instanceof Error ? err.message : String(err)}`);
+                    const errName = err instanceof Error ? err.name : 'Error';
+                    log.debug(`Auto-resume skipped (${errName}); starting fresh session`);
+                    writeOut('\n[Previous session unavailable — started fresh session]\n');
                 }
             }
         }
