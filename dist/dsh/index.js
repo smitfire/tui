@@ -1,5 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { isLoopbackHost } from '@deepseek-ai/dsh-host-webserver';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -15,6 +17,49 @@ export const Config = z.object({
     appName: z.string().default('ns-dsh'),
     version: z.string().default('0.1.0'),
 });
+const VALID_SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+let lastPersistedSessionKey;
+function readPersistedLastSessionId() {
+    const stateDir = process.env.NS_DSH_STATE_DIR?.trim();
+    if (!stateDir || process.env.NS_DSH_NEW_SESSION === '1')
+        return undefined;
+    try {
+        const file = join(stateDir, 'last-session.json');
+        if (!existsSync(file))
+            return undefined;
+        const parsed = JSON.parse(readFileSync(file, 'utf8'));
+        if (typeof parsed.cwd !== 'string' || resolve(parsed.cwd) !== resolve(process.cwd())) {
+            return undefined;
+        }
+        const sid = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : '';
+        return VALID_SESSION_ID_RE.test(sid) ? sid : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function writePersistedLastSessionId(sessionId) {
+    if (process.env.NS_DSH_NEW_SESSION === '1')
+        return;
+    const stateDir = process.env.NS_DSH_STATE_DIR?.trim();
+    if (!stateDir || !VALID_SESSION_ID_RE.test(sessionId))
+        return;
+    const cwd = resolve(process.cwd());
+    const cacheKey = `${stateDir}::${cwd}::${sessionId}`;
+    if (cacheKey === lastPersistedSessionKey)
+        return;
+    try {
+        mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+        const target = join(stateDir, 'last-session.json');
+        const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+        writeFileSync(tmp, `${JSON.stringify({ sessionId, cwd, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+        renameSync(tmp, target);
+        lastPersistedSessionKey = cacheKey;
+    }
+    catch {
+        /* best-effort persistence */
+    }
+}
 const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i;
 const LOOPBACK_HOST_RE = /^(?:127\.\d+\.\d+\.\d+|localhost|\[::1\]|::1)(?::\d+)?$/i;
 const LOOPBACK_REMOTE_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -264,20 +309,31 @@ export function apply(ctx, rawConfig = {}) {
             if (handle)
                 activeHandle = handle;
             activeAgent = agent;
+            writePersistedLastSessionId(nextSid);
             return agent;
         };
         const existing = resolveRootAgent();
         if (!resumeId && existing) {
             return setActive(existing);
         }
-        if (resumeId) {
-            const live = ctx.agents.get(SessionId(resumeId));
+        const candidateResume = resumeId ?? readPersistedLastSessionId();
+        if (candidateResume) {
+            const live = ctx.agents.get(SessionId(candidateResume));
             if (live) {
                 return setActive(live);
             }
             if (ctx.get('sessionPersistence')) {
-                const resumed = await ctx.agents.resume({ resumeSessionId: SessionId(resumeId) });
-                return setActive(resumed.agent, resumed);
+                try {
+                    const resumed = await ctx.agents.resume({ resumeSessionId: SessionId(candidateResume) });
+                    return setActive(resumed.agent, resumed);
+                }
+                catch (err) {
+                    if (resumeId)
+                        throw err;
+                    const errName = err instanceof Error ? err.name : 'Error';
+                    log.debug(`Auto-resume skipped (${errName}); starting fresh session`);
+                    writeOut('\n[Previous session unavailable — started fresh session]\n');
+                }
             }
         }
         const sid = SessionId(randomUUID());
@@ -645,6 +701,19 @@ export function apply(ctx, rawConfig = {}) {
             text: JSON.stringify(toml ? { ...state, routesTomlPreview: toml.split('\n').slice(0, 8) } : state, null, 2),
         };
     });
+    regCmd('watchdog', 'Inspect anti-stall watchdog status and auto-resume events', () => {
+        const nsTeam = ctx.get('nsTeam');
+        if (!nsTeam?.watchdog?.getStatus) {
+            return {
+                kind: 'success',
+                text: JSON.stringify({ active: false, reason: 'ns-team watchdog unavailable' }, null, 2),
+            };
+        }
+        return {
+            kind: 'success',
+            text: JSON.stringify(nsTeam.watchdog.getStatus(tuiService.activeSessionId()), null, 2),
+        };
+    });
     regCmd('history', 'Show recent prompts entered in this TUI', () => ({
         kind: 'success',
         text: promptHistory.length ? promptHistory.map((p, i) => `${i + 1}. ${p}`).join('\n') : 'No prompts submitted yet.',
@@ -930,6 +999,9 @@ export function apply(ctx, rawConfig = {}) {
                 process.stdout?.off('resize', onResize);
             // Release stdin ref only on final plugin teardown so test/daemon loops exit cleanly.
             process.stdin.pause();
+            if (!process.stdin.isTTY) {
+                process.stdin.unref?.();
+            }
         };
     }
     ctx.effect(() => () => {

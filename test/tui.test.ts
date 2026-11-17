@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import CommandsService from '@deepseek-ai/dsh-commands';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
@@ -432,5 +435,112 @@ test('Interactive attached TUI handles inline approvals, questions, ns_ask_user 
     if (prevTok === undefined) delete process.env.NS_DSH_TUI_TOKEN;
     else process.env.NS_DSH_TUI_TOKEN = prevTok;
     await fiber.dispose();
+  }
+});
+
+test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly on missing session, and serves /watchdog', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'ns-tui-lastsess-'));
+  const prevStateDir = process.env.NS_DSH_STATE_DIR;
+  const prevNewSession = process.env.NS_DSH_NEW_SESSION;
+  process.env.NS_DSH_STATE_DIR = stateDir;
+  delete process.env.NS_DSH_NEW_SESSION;
+
+  const makeAgent = (id: string) => ({
+    id,
+    status: 'idle',
+    session: { id, header: { cwd: process.cwd() }, append: () => 1 },
+    options: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash' },
+    model: {
+      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash' }),
+      select: () => {},
+    },
+    followup: () => {},
+    cancel: () => {},
+  });
+
+  try {
+    // 1. Persisted session from a DIFFERENT cwd is NOT auto-resumed
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'other-repo-sess', cwd: '/tmp/unrelated-repo-xyz' }), 'utf8');
+    // 2. Persisted session matching process.cwd() IS auto-resumed
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'persisted-sess-99', cwd: process.cwd() }), 'utf8');
+    const ctx1 = new Context();
+    await ctx1.plugin(SystemPrompt);
+    await ctx1.plugin(ToolsService);
+    await ctx1.plugin(CommandsService);
+    ctx1.provide('sessions', {});
+    ctx1.provide('sessionPersistence', {});
+    const resumedIds: string[] = [];
+    const createdAgents: string[] = [];
+    const liveAgents = new Map<string, ReturnType<typeof makeAgent>>();
+    ctx1.provide('agents', {
+      get: (id: string) => liveAgents.get(String(id)),
+      list: () => [...liveAgents.values()],
+      resume: async ({ resumeSessionId }: { resumeSessionId: string }) => {
+        resumedIds.push(resumeSessionId);
+        const a = makeAgent(resumeSessionId);
+        liveAgents.set(resumeSessionId, a);
+        return { agent: a, dispose: async () => { liveAgents.delete(resumeSessionId); } };
+      },
+      create: async ({ sessionId }: { sessionId: string }) => {
+        createdAgents.push(sessionId);
+        const a = makeAgent(sessionId);
+        liveAgents.set(sessionId, a);
+        return { agent: a, dispose: async () => { liveAgents.delete(sessionId); } };
+      },
+    });
+    ctx1.provide('nsTeam', {
+      watchdog: { getStatus: (sid?: string) => ({ activeSessions: 1, runningSessions: 0, totalEvents: 2, session: { sessionId: sid } }) },
+    });
+
+    const f1 = ctx1.plugin(tuiPlugin, { enabled: true, interactive: true, appName: 'ns-dsh' });
+    await f1;
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      assert.deepEqual(resumedIds, ['persisted-sess-99']);
+      assert.equal(ctx1.nsTui?.activeSessionId(), 'persisted-sess-99');
+      const wdOut = await ctx1.nsTui?.executeCommand('/watchdog');
+      assert.equal(wdOut?.kind, 'success');
+      assert.match(wdOut?.text ?? '', /"totalEvents": 2/);
+      assert.equal(existsSync(join(stateDir, 'last-session.json')), true);
+      const saved = JSON.parse(readFileSync(join(stateDir, 'last-session.json'), 'utf8')) as { sessionId: string };
+      assert.equal(saved.sessionId, 'persisted-sess-99');
+    } finally {
+      await f1.dispose();
+    }
+
+    // Corrupt/missing persisted session for current cwd falls back cleanly to create() without crashing
+    writeFileSync(join(stateDir, 'last-session.json'), JSON.stringify({ sessionId: 'missing-stale-sess', cwd: process.cwd() }), 'utf8');
+    const ctx2 = new Context();
+    await ctx2.plugin(SystemPrompt);
+    await ctx2.plugin(ToolsService);
+    await ctx2.plugin(CommandsService);
+    ctx2.provide('sessions', {});
+    ctx2.provide('sessionPersistence', {});
+    ctx2.provide('agents', {
+      get: () => undefined,
+      list: () => [],
+      resume: async () => {
+        throw new Error('session not found');
+      },
+      create: async ({ sessionId }: { sessionId: string }) => ({ agent: makeAgent(sessionId), dispose: async () => {} }),
+    });
+    const f2 = ctx2.plugin(tuiPlugin, { enabled: true, interactive: true, appName: 'ns-dsh' });
+    await f2;
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const wdFallback = await ctx2.nsTui?.executeCommand('/watchdog');
+      assert.equal(wdFallback?.kind, 'success');
+      assert.match(wdFallback?.text ?? '', /ns-team watchdog unavailable/);
+      const updated = JSON.parse(readFileSync(join(stateDir, 'last-session.json'), 'utf8')) as { sessionId: string };
+      assert.notEqual(updated.sessionId, 'missing-stale-sess');
+    } finally {
+      await f2.dispose();
+    }
+  } finally {
+    if (prevStateDir === undefined) delete process.env.NS_DSH_STATE_DIR;
+    else process.env.NS_DSH_STATE_DIR = prevStateDir;
+    if (prevNewSession === undefined) delete process.env.NS_DSH_NEW_SESSION;
+    else process.env.NS_DSH_NEW_SESSION = prevNewSession;
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
