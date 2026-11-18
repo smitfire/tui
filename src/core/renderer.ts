@@ -170,7 +170,14 @@ export function renderFooter(status: TuiStatusSnapshot, columns = 100, noColor?:
   const width = Math.max(44, columns);
   const rule = paint('─'.repeat(Math.min(width, 120)), DIM, noColor);
   const effort = status.effort ? ` (${status.effort})` : '';
-  const modeTag = status.planMode ? paint('[PLAN] ', YELLOW + BOLD, noColor) : '';
+  let modeTag = '';
+  if (status.planMode) {
+    modeTag = paint('[PLAN] ', YELLOW + BOLD, noColor);
+  } else if (status.orchestratorPhase === 'planning') {
+    modeTag = paint('[ORCH:PLAN] ', YELLOW + BOLD, noColor);
+  } else if (status.orchestratorPhase === 'executing') {
+    modeTag = paint('[ORCH:EXEC] ', CYAN + BOLD, noColor);
+  }
   const swEsc = status.switchyardEscalations ? `↑${status.switchyardEscalations}` : '';
   const sw = status.switchyardTier ? `Switchyard: ${status.switchyardTier}${swEsc}` : 'Switchyard: direct';
   const ctx = typeof status.contextPercent === 'number' ? `ctx ${status.contextPercent}%` : 'ctx 0%';

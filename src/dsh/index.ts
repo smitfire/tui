@@ -214,7 +214,34 @@ function pickStringField(obj: Record<string, unknown>, keys: readonly string[]):
   return undefined;
 }
 
-// Canonical DSH & MCP file mutation tool names eligible for diff preview cards.
+interface NsTeamTuiBridge {
+  strategy?: string;
+  router?: {
+    stateFor?: (sessionId: string) => Record<string, unknown> & { activeTier?: string; escalations?: number };
+  };
+  watchdog?: {
+    getStatus?: (sid?: string) => unknown;
+  };
+  getOrchestratorState?: (sessionId: string) => {
+    phase?: string;
+    activeCardId?: string;
+    planHandoffs?: number;
+    replans?: number;
+    cadenceReviews?: number;
+  };
+  enterPlanMode?: (input: {
+    sessionId: string;
+    reason: string;
+    preferredProvider?: string;
+    kind?: 'manual';
+  }) => { ok: boolean; phase: string; cardId?: string; nextRoute: { provider: string; model: string; reasoningEffort: string } };
+  exitPlanMode?: (input: {
+    sessionId: string;
+    plan: string;
+    preferredProvider?: string;
+  }) => { ok: boolean; phase: string; cardId?: string; nextRoute: { provider: string; model: string; reasoningEffort: string } };
+  exportRoutesToml?: () => string;
+}
 const DIFF_TOOL_KINDS = new Map<string, 'edit' | 'write'>([
   ['edit', 'edit'],
   ['edit_file', 'edit'],
@@ -318,22 +345,21 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
           };
         }
       | undefined;
-    const nsTeam = ctx.get('nsTeam') as
-      | {
-          router?: {
-            stateFor?: (sessionId: string) => { activeTier?: string; escalations?: number };
-          };
-        }
-      | undefined;
+    const nsTeam = ctx.get('nsTeam') as NsTeamTuiBridge | undefined;
     const nsBoard = ctx.get('nsBoard') as
       | {
-          snapshot?: () => { cards: Array<{ id: string; column: string }> };
+          snapshot?: () => { cards: Array<{ id: string; column: string; modelTier?: string }> };
         }
       | undefined;
     const fw = sid !== 'none' ? nsCtx?.getSessionSummary?.(sid) : undefined;
     const sw = sid !== 'none' ? nsTeam?.router?.stateFor?.(sid) : undefined;
+    const orch = sid !== 'none' ? nsTeam?.getOrchestratorState?.(sid) : undefined;
+    const orchestratorPhase = nsTeam?.strategy === 'orchestrator' ? orch?.phase : undefined;
     const boardSnap = nsBoard?.snapshot?.();
     const runningCard = boardSnap?.cards.find((c) => c.column === 'in_progress' || c.column === 'review');
+    const activeCardText = runningCard
+      ? `${runningCard.id} [${runningCard.column}${runningCard.modelTier ? `:${runningCard.modelTier}` : ''}]`
+      : undefined;
 
     return {
       appName,
@@ -346,12 +372,14 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
       effort: sel?.reasoningEffort,
       switchyardTier: sw?.activeTier ?? 'direct',
       switchyardEscalations: sw?.escalations ?? 0,
+      orchestratorStrategy: nsTeam?.strategy,
+      orchestratorPhase,
       contextPercent: Math.min(100, Math.round((totalTokens / 128_000) * 100)),
       forewispStrategy: fw?.strategy ?? fw?.tier ?? 'local',
       forewispOffers: fw?.activeOffers ?? 0,
       cugaMode: planMode ? 'plan-readonly' : 'enforce',
       cugaBlocks,
-      activeCard: runningCard ? `${runningCard.id} [${runningCard.column}]` : undefined,
+      activeCard: activeCardText,
       tokensUsed: totalTokens,
       planMode,
       attached,
@@ -519,6 +547,9 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     'vars_list',
     'board_view',
     'board_list',
+    'board_propose',
+    'propose_work',
+    'orchestrator_status',
     'switchyard_status',
     'cuga_evaluate_policy',
     'cuga_evaluate_intent',
@@ -667,20 +698,21 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
   regCmd('help', 'List available ns-dsh slash commands', () => ({
     kind: 'success',
     text: [
-      '/plan [on|off|<task>]  Toggle read-only planning mode or send planning prompt',
-      '/status                Show live model, Switchyard, Forewisp/JEV, CUGA & token status',
-      '/board / /tasks        Show Kanban board cards & dependencies',
-      '/pickup <id>           Move card to Ready queue',
-      '/pause <id>            Pause running card',
-      '/cancel <id>           Cancel card',
-      '/diff [id]             Show rendered unified diff for card or last edited file',
-      '/context [query]       Inspect Forewisp / JEV offers or search knowledge',
-      '/cuga                  Inspect CUGA security blocks & crystallized playbooks',
-      '/switchyard            Inspect current Switchyard tier & escalations',
-      '/model [prov/mod [eff]] Switch active model or reasoning effort',
-      '/resume <sessionId>    Resume existing session ID',
-      '/exit                  Detach terminal TUI (background host keeps running)',
-      '/shutdown              Stop persistent ns-dsh host cleanly',
+      '/plan [on|off|<task>]           Toggle read-only planning mode or send planning prompt',
+      '/orchestrator [status|plan|exec] Inspect or switch Orchestrator Plan<->Execute phase',
+      '/status                         Show live model, Switchyard, Forewisp/JEV, CUGA & token status',
+      '/board / /tasks                 Show Kanban board cards, tiers & dependencies',
+      '/pickup <id>                    Move card to Ready queue',
+      '/pause <id>                     Pause running card',
+      '/cancel <id>                    Cancel card',
+      '/diff [id]                      Show rendered unified diff for card or last edited file',
+      '/context [query]                Inspect Forewisp / JEV offers or search knowledge',
+      '/cuga                           Inspect CUGA security blocks & crystallized playbooks',
+      '/switchyard                     Inspect current Switchyard tier & escalations',
+      '/model [prov/mod [eff]]         Switch active model or reasoning effort',
+      '/resume <sessionId>             Resume existing session ID',
+      '/exit                           Detach terminal TUI (background host keeps running)',
+      '/shutdown                       Stop persistent ns-dsh host cleanly',
     ].join('\n'),
   }));
 
@@ -689,24 +721,119 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     text: renderFooter(buildStatus(), cols(), true),
   }));
 
-  regCmd('plan', 'Toggle read-only PLAN mode or submit a planning prompt', async ({ rawInput }) => {
+  const applyOrchestratorSync = (agent: Agent, enablePlan: boolean, detail: string) => {
+    const nsTeam = ctx.get('nsTeam') as NsTeamTuiBridge | undefined;
+    if (nsTeam?.strategy !== 'orchestrator') return;
+    const sid = String(agent.session.id);
+    const preferredProvider = agent.model?.current?.()?.provider;
+    let route: { provider: string; model: string; reasoningEffort: string } | undefined;
+    if (enablePlan) {
+      route = nsTeam.enterPlanMode?.({
+        sessionId: sid,
+        reason: detail || 'Operator enabled PLAN mode',
+        preferredProvider,
+        kind: 'manual',
+      })?.nextRoute;
+    } else if (nsTeam.getOrchestratorState?.(sid)?.phase === 'planning') {
+      route = nsTeam.exitPlanMode?.({
+        sessionId: sid,
+        plan: detail || 'Operator handed back to executor via /plan off',
+        preferredProvider,
+      })?.nextRoute;
+    }
+    if (route && typeof agent.model?.select === 'function') {
+      agent.model.select({
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: route.reasoningEffort as ReasoningEffortId,
+      });
+    }
+  };
+
+  regCmd('plan', 'Toggle read-only PLAN mode or submit a planning prompt', async ({ agent, rawInput }) => {
     const arg = rawInput.trim();
     if (!arg) {
       planMode = !planMode;
+      applyOrchestratorSync(agent, planMode, planMode ? 'TUI /plan toggle on' : 'TUI /plan toggle off');
       return { kind: 'success', text: `Plan mode ${planMode ? 'ENABLED (read-only)' : 'DISABLED'}.` };
     }
     if (arg === 'on' || arg === 'off') {
       planMode = arg === 'on';
+      applyOrchestratorSync(agent, planMode, `TUI /plan ${arg}`);
       return { kind: 'success', text: `Plan mode ${planMode ? 'ENABLED (read-only)' : 'DISABLED'}.` };
     }
     planMode = true;
+    applyOrchestratorSync(agent, true, arg);
     await dispatchPromptText(arg);
     return { kind: 'success', text: `Submitted planning prompt in PLAN mode.` };
   });
 
+  regCmd('orchestrator', 'Inspect or switch Orchestrator mode (/orchestrator [status|plan <reason>|exec <plan>])', ({ agent, rawInput }) => {
+    const nsTeam = ctx.get('nsTeam') as NsTeamTuiBridge | undefined;
+    if (!nsTeam) {
+      return { kind: 'success', text: 'ns-team orchestrator service unavailable' };
+    }
+    const sid = String(agent.session.id);
+    const trimmed = rawInput.trim();
+    const spaceIdx = trimmed.indexOf(' ');
+    const sub = (spaceIdx >= 0 ? trimmed.slice(0, spaceIdx) : trimmed).toLowerCase();
+    const arg = spaceIdx >= 0 ? trimmed.slice(spaceIdx + 1).trim() : '';
+
+    if (!sub || sub === 'status') {
+      return {
+        kind: 'success',
+        text: JSON.stringify(
+          {
+            strategy: nsTeam.strategy ?? 'unknown',
+            orchestrator: nsTeam.getOrchestratorState?.(sid) ?? null,
+            switchyard: nsTeam.router?.stateFor?.(sid) ?? null,
+          },
+          null,
+          2,
+        ),
+      };
+    }
+
+    const preferredProvider = agent.model?.current?.()?.provider;
+    if (sub === 'plan') {
+      const out = nsTeam.enterPlanMode?.({
+        sessionId: sid,
+        reason: arg || 'Operator requested PLAN phase via /orchestrator plan',
+        preferredProvider,
+        kind: 'manual',
+      });
+      if (!out) return { kind: 'error', text: 'enterPlanMode unavailable on ns-team' };
+      if (typeof agent.model?.select === 'function') {
+        agent.model.select({
+          provider: out.nextRoute.provider,
+          model: out.nextRoute.model,
+          reasoningEffort: out.nextRoute.reasoningEffort as ReasoningEffortId,
+        });
+      }
+      return { kind: 'success', text: JSON.stringify(out, null, 2) };
+    }
+    if (sub === 'exec') {
+      const out = nsTeam.exitPlanMode?.({
+        sessionId: sid,
+        plan: arg || 'Operator approved execution via /orchestrator exec',
+        preferredProvider,
+      });
+      if (!out) return { kind: 'error', text: 'exitPlanMode unavailable on ns-team' };
+      if (typeof agent.model?.select === 'function') {
+        agent.model.select({
+          provider: out.nextRoute.provider,
+          model: out.nextRoute.model,
+          reasoningEffort: out.nextRoute.reasoningEffort as ReasoningEffortId,
+        });
+      }
+      return { kind: 'success', text: JSON.stringify(out, null, 2) };
+    }
+    return { kind: 'error', text: 'Usage: /orchestrator [status|plan <reason>|exec <plan>]' };
+  });
+
   const listBoardHandler = () => {
     const nsBoard = ctx.get('nsBoard') as
-      | { snapshot?: () => { cards: Array<{ id: string; column: string; owner: string; title: string; blockedBy: string[] }> } }
+      | { snapshot?: () => { cards: Array<{ id: string; column: string; owner: string; modelTier?: string; phase?: string; title: string; blockedBy: string[] }> } }
       | undefined;
     if (!nsBoard?.snapshot) return { kind: 'error' as const, text: 'ns-board service is unavailable' };
     const cards = nsBoard.snapshot().cards;
@@ -714,7 +841,11 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     return {
       kind: 'success' as const,
       text: cards
-        .map((c) => `${c.id} | ${c.column} | ${c.owner} | ${c.title}${c.blockedBy?.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : ''}`)
+        .map((c) => {
+          const tier = c.modelTier ? ` (${c.modelTier}${c.phase ? `/${c.phase}` : ''})` : '';
+          const deps = c.blockedBy?.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : '';
+          return `${c.id} | ${c.column} | ${c.owner}${tier} | ${c.title}${deps}`;
+        })
         .join('\n'),
     };
   };

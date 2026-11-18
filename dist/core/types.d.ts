@@ -9,6 +9,8 @@ export interface TuiStatusSnapshot {
     effort?: string;
     switchyardTier?: string;
     switchyardEscalations?: number;
+    orchestratorStrategy?: string;
+    orchestratorPhase?: string;
     contextPercent?: number;
     forewispStrategy?: string;
     forewispOffers?: number;
