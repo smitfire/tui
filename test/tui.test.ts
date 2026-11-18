@@ -557,3 +557,90 @@ test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly o
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test('Orchestrator /orchestrator command, /plan sync, footer phase badges, and card modelTier formatting work', async () => {
+  const orchFooterPlan = renderFooter(
+    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-3.8-flash', effort: 'high', orchestratorPhase: 'planning' },
+    120,
+    true,
+  );
+  assert.match(orchFooterPlan, /\[ORCH:PLAN\]/);
+  const orchFooterExec = renderFooter(
+    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-3.8-flash', effort: 'low', orchestratorPhase: 'executing' },
+    120,
+    true,
+  );
+  assert.match(orchFooterExec, /\[ORCH:EXEC\]/);
+
+  const ctx = new Context();
+  await ctx.plugin(SystemPrompt);
+  await ctx.plugin(ToolsService);
+  await ctx.plugin(CommandsService);
+  ctx.provide('sessions', {});
+
+  const selected: Array<{ provider: string; model: string; reasoningEffort?: string }> = [];
+  const fakeAgent = {
+    id: 'sess-orch-tui',
+    status: 'idle',
+    session: { id: 'sess-orch-tui', header: { cwd: process.cwd() }, append: () => 1 },
+    model: {
+      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'low' }),
+      select: (s: { provider: string; model: string; reasoningEffort?: string }) => selected.push(s),
+    },
+    followup: () => {},
+    cancel: () => {},
+  } as never;
+  ctx.provide('agents', { get: () => fakeAgent, list: () => [fakeAgent] });
+
+  let phase: 'planning' | 'executing' = 'planning';
+  ctx.provide('nsTeam', {
+    strategy: 'orchestrator',
+    router: { stateFor: () => ({ activeTier: phase === 'planning' ? 'capable' : 'efficient', escalations: 0 }) },
+    getOrchestratorState: () => ({ phase, activeCardId: 'card-t1', planHandoffs: 1, replans: 0, cadenceReviews: 0 }),
+    enterPlanMode: ({ reason }: { reason: string }) => {
+      phase = 'planning';
+      return { ok: true, phase, cardId: 'card-t1', reason, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'high' } };
+    },
+    exitPlanMode: ({ plan }: { plan: string }) => {
+      phase = 'executing';
+      return { ok: true, phase, cardId: 'card-t1', plan, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'low' } };
+    },
+  });
+  ctx.provide('nsBoard', {
+    snapshot: () => ({ cards: [{ id: 'card-t1', column: 'in_progress', owner: 'worker', modelTier: 'efficient', phase: 'executing', title: 'Fix typo', blockedBy: [] }] }),
+  });
+
+  const fiber = ctx.plugin(tuiPlugin, { interactive: false, appName: 'ns-dsh', version: '0.1.0' });
+  await fiber;
+  try {
+    const stInitial = ctx.nsTui!.getStatus();
+    assert.equal(stInitial.orchestratorStrategy, 'orchestrator');
+    assert.equal(stInitial.orchestratorPhase, 'planning');
+    assert.equal(stInitial.activeCard, 'card-t1 [in_progress:efficient]');
+
+    const tasksOut = await ctx.nsTui!.executeCommand('/tasks');
+    assert.match(tasksOut?.text ?? '', /efficient\/executing/);
+
+    const orchStatus = await ctx.nsTui!.executeCommand('/orchestrator status');
+    assert.equal(orchStatus?.kind, 'success');
+    assert.match(orchStatus?.text ?? '', /"strategy": "orchestrator"/);
+
+    const execOut = await ctx.nsTui!.executeCommand('/orchestrator exec Approve step 1');
+    assert.equal(execOut?.kind, 'success');
+    assert.equal(phase, 'executing');
+    assert.equal(selected.at(-1)?.reasoningEffort, 'low');
+
+    const statusDuringExec = await ctx.nsTui!.executeCommand('/status');
+    assert.match(statusDuringExec?.text ?? '', /\[ORCH:EXEC\]/);
+
+    const planOut = await ctx.nsTui!.executeCommand('/orchestrator plan Re-evaluate design');
+    assert.equal(planOut?.kind, 'success');
+    assert.equal(phase, 'planning');
+    assert.equal(selected.at(-1)?.reasoningEffort, 'high');
+
+    const badOrch = await ctx.nsTui!.executeCommand('/orchestrator bogus');
+    assert.equal(badOrch?.kind, 'error');
+  } finally {
+    await fiber.dispose();
+  }
+});
