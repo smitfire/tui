@@ -721,12 +721,24 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
     text: renderFooter(buildStatus(), cols(), true),
   }));
 
+  const selectRouteIfPresent = (
+    agent: Agent,
+    route?: { provider?: string; model?: string; reasoningEffort?: string },
+  ) => {
+    if (!route?.provider || !route?.model || typeof agent.model?.select !== 'function') return;
+    agent.model.select({
+      provider: route.provider,
+      model: route.model,
+      ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort as ReasoningEffortId } : {}),
+    });
+  };
+
   const applyOrchestratorSync = (agent: Agent, enablePlan: boolean, detail: string) => {
     const nsTeam = ctx.get('nsTeam') as NsTeamTuiBridge | undefined;
     if (nsTeam?.strategy !== 'orchestrator') return;
     const sid = String(agent.session.id);
     const preferredProvider = agent.model?.current?.()?.provider;
-    let route: { provider: string; model: string; reasoningEffort: string } | undefined;
+    let route: { provider?: string; model?: string; reasoningEffort?: string } | undefined;
     if (enablePlan) {
       route = nsTeam.enterPlanMode?.({
         sessionId: sid,
@@ -741,13 +753,7 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         preferredProvider,
       })?.nextRoute;
     }
-    if (route && typeof agent.model?.select === 'function') {
-      agent.model.select({
-        provider: route.provider,
-        model: route.model,
-        reasoningEffort: route.reasoningEffort as ReasoningEffortId,
-      });
-    }
+    selectRouteIfPresent(agent, route);
   };
 
   regCmd('plan', 'Toggle read-only PLAN mode or submit a planning prompt', async ({ agent, rawInput }) => {
@@ -803,13 +809,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         kind: 'manual',
       });
       if (!out) return { kind: 'error', text: 'enterPlanMode unavailable on ns-team' };
-      if (typeof agent.model?.select === 'function') {
-        agent.model.select({
-          provider: out.nextRoute.provider,
-          model: out.nextRoute.model,
-          reasoningEffort: out.nextRoute.reasoningEffort as ReasoningEffortId,
-        });
-      }
+      if (!out.ok || !out.nextRoute) return { kind: 'error', text: JSON.stringify(out) };
+      selectRouteIfPresent(agent, out.nextRoute);
       return { kind: 'success', text: JSON.stringify(out, null, 2) };
     }
     if (sub === 'exec') {
@@ -819,13 +820,8 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
         preferredProvider,
       });
       if (!out) return { kind: 'error', text: 'exitPlanMode unavailable on ns-team' };
-      if (typeof agent.model?.select === 'function') {
-        agent.model.select({
-          provider: out.nextRoute.provider,
-          model: out.nextRoute.model,
-          reasoningEffort: out.nextRoute.reasoningEffort as ReasoningEffortId,
-        });
-      }
+      if (!out.ok || !out.nextRoute) return { kind: 'error', text: JSON.stringify(out) };
+      selectRouteIfPresent(agent, out.nextRoute);
       return { kind: 'success', text: JSON.stringify(out, null, 2) };
     }
     return { kind: 'error', text: 'Usage: /orchestrator [status|plan <reason>|exec <plan>]' };
@@ -842,7 +838,11 @@ export function apply(ctx: Context, rawConfig: Partial<PluginConfig> = {}): void
       kind: 'success' as const,
       text: cards
         .map((c) => {
-          const tier = c.modelTier ? ` (${c.modelTier}${c.phase ? `/${c.phase}` : ''})` : '';
+          let tier = '';
+          if (c.modelTier) {
+            const phasePart = c.phase ? `/${c.phase}` : '';
+            tier = ` (${c.modelTier}${phasePart})`;
+          }
           const deps = c.blockedBy?.length ? ` (blockedBy: ${c.blockedBy.join(',')})` : '';
           return `${c.id} | ${c.column} | ${c.owner}${tier} | ${c.title}${deps}`;
         })
