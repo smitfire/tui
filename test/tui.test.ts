@@ -26,7 +26,7 @@ test('Claude Code / agy renderer handles headers, badges, unified diffs, footer 
     cwd: '/tmp/work/demo-repo',
     branch: 'main',
     sessionId: 'abc12345def67890',
-    model: 'antigravity-gemini-3.8-flash',
+    model: 'antigravity-gemini-4-hydrogen',
     effort: 'high',
     switchyardTier: 'capable',
     switchyardEscalations: 1,
@@ -152,7 +152,7 @@ test('DSH Cordis plugin routes approval/user-questions inline when attached and 
     id: 'sess-tui-1',
     status: 'idle',
     session: { id: 'sess-tui-1', header: { cwd: process.cwd() }, append: () => 1 },
-    model: { current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'high' }) },
+    model: { current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen', reasoningEffort: 'high' }) },
     followup: () => {},
     cancel: () => {},
   } as never;
@@ -188,7 +188,7 @@ test('DSH Cordis plugin routes approval/user-questions inline when attached and 
     // Slash command execution works cleanly
     const statusOut = await ctx.nsTui.executeCommand('/status');
     assert.equal(statusOut?.kind, 'success');
-    assert.match(statusOut?.text ?? '', /antigravity-gemini-3\.8-flash/);
+    assert.match(statusOut?.text ?? '', /antigravity-gemini-4-hydrogen/);
 
     const planOut = await ctx.nsTui.executeCommand('/plan on');
     assert.equal(planOut?.kind, 'success');
@@ -462,9 +462,9 @@ test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly o
     id,
     status: 'idle',
     session: { id, header: { cwd: process.cwd() }, append: () => 1 },
-    options: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash' },
+    options: { provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen' },
     model: {
-      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash' }),
+      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen' }),
       select: () => {},
     },
     followup: () => {},
@@ -560,13 +560,13 @@ test('Auto-resumes from NS_DSH_STATE_DIR/last-session.json, falls back cleanly o
 
 test('Orchestrator /orchestrator command, /plan sync, footer phase badges, and card modelTier formatting work', async () => {
   const orchFooterPlan = renderFooter(
-    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-3.8-flash', effort: 'high', orchestratorPhase: 'planning' },
+    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-4-hydrogen', effort: 'high', orchestratorPhase: 'planning' },
     120,
     true,
   );
   assert.match(orchFooterPlan, /\[ORCH:PLAN\]/);
   const orchFooterExec = renderFooter(
-    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-3.8-flash', effort: 'low', orchestratorPhase: 'executing' },
+    { cwd: '/tmp/repo', sessionId: 'orch-1', model: 'antigravity-gemini-4-hydrogen', effort: 'low', orchestratorPhase: 'executing' },
     120,
     true,
   );
@@ -584,7 +584,7 @@ test('Orchestrator /orchestrator command, /plan sync, footer phase badges, and c
     status: 'idle',
     session: { id: 'sess-orch-tui', header: { cwd: process.cwd() }, append: () => 1 },
     model: {
-      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'low' }),
+      current: () => ({ provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen', reasoningEffort: 'low' }),
       select: (s: { provider: string; model: string; reasoningEffort?: string }) => selected.push(s),
     },
     followup: () => {},
@@ -599,11 +599,11 @@ test('Orchestrator /orchestrator command, /plan sync, footer phase badges, and c
     getOrchestratorState: () => ({ phase, activeCardId: 'card-t1', planHandoffs: 1, replans: 0, cadenceReviews: 0 }),
     enterPlanMode: ({ reason }: { reason: string }) => {
       phase = 'planning';
-      return { ok: true, phase, cardId: 'card-t1', reason, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'high' } };
+      return { ok: true, phase, cardId: 'card-t1', reason, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen', reasoningEffort: 'high' } };
     },
     exitPlanMode: ({ plan }: { plan: string }) => {
       phase = 'executing';
-      return { ok: true, phase, cardId: 'card-t1', plan, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-3.8-flash', reasoningEffort: 'low' } };
+      return { ok: true, phase, cardId: 'card-t1', plan, nextRoute: { provider: 'google-antigravity', model: 'antigravity-gemini-4-hydrogen', reasoningEffort: 'low' } };
     },
   });
   ctx.provide('nsBoard', {
